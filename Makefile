@@ -6,10 +6,10 @@ uname_S := $(shell sh -c 'uname -s 2>/dev/null || echo not')
 
 # Compile flags for linux / osx
 ifeq ($(uname_S),Linux)
-	SHOBJ_CFLAGS ?= -W -Wall -fno-common -g -ggdb -std=c99 -O2
+	SHOBJ_CFLAGS ?= -W -Wall -fno-common -g -ggdb -std=c11 -O2
 	SHOBJ_LDFLAGS ?= -shared
 else
-	SHOBJ_CFLAGS ?= -W -Wall -dynamic -fno-common -g -ggdb -std=c99 -O2
+	SHOBJ_CFLAGS ?= -W -Wall -dynamic -fno-common -g -ggdb -std=c11 -O2
 	SHOBJ_LDFLAGS ?= -bundle -undefined dynamic_lookup
 endif
 
@@ -22,8 +22,10 @@ all: disque.so
 
 disque.xo: ../redismodule.h
 
-disque.so: ack.xo job.xo queue.xo sds.xo skiplist.xo cluster.xo
-	$(LD) -o $@ $< $(SHOBJ_LDFLAGS) $(LIBS) -lc
+MODULE_OBJECTS=ack.xo job.xo queue.xo sds.xo skiplist.xo cluster.xo utils.xo module.xo aof.xo rax.xo adlist.xo
+
+disque.so: $(MODULE_OBJECTS)
+	$(LD) -o $@ $(MODULE_OBJECTS) $(SHOBJ_LDFLAGS) $(LIBS) -lc
 
 clean:
 	rm -rf *.xo *.so

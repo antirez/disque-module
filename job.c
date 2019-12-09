@@ -1,19 +1,12 @@
 /* Jobs handling and commands.
  *
- * Copyright (c) 2014, Salvatore Sanfilippo <antirez at gmail dot com>
- * All rights reserved.
+ * Copyright (c) 2014-2019, Salvatore Sanfilippo <antirez at gmail dot com>
+ * All rights reserved. This code is under the AGPL license, check the
+ * LICENSE file for more info.
  *
  */
 
-#include "server.h"
-#include "cluster.h"
-#include "job.h"
-#include "queue.h"
-#include "ack.h"
-#include "sha1.h"
-#include "endianconv.h"
-
-#include <ctype.h>
+#include "disque.h"
 
 /* ------------------------- Low level jobs functions ----------------------- */
 
@@ -61,7 +54,7 @@ void generateJobID(char *id, int ttl, int retry) {
     /* Get the pseudo random bytes using SHA1 in counter mode. */
     counter++;
     SHA1Init(&ctx);
-    SHA1Update(&ctx,(unsigned char*)server.jobid_seed,CONFIG_RUN_ID_SIZE);
+    SHA1Update(&ctx,(unsigned char*)JobIDSeed,sizeof(JobIDSeed));
     SHA1Update(&ctx,(unsigned char*)&counter,sizeof(counter));
     SHA1Final(hash,&ctx);
 
@@ -79,7 +72,8 @@ void generateJobID(char *id, int ttl, int retry) {
     *id++ = '-';
 
     /* 8 bytes from Node ID + separator */
-    for (j = 0; j < 8; j++) *id++ = server.cluster->myself->name[j];
+    const char *myself = RedisModule_GetMyClusterID();
+    for (j = 0; j < 8; j++) *id++ = myself[j];
     *id++ = '-';
 
     /* Pseudorandom Message ID + separator. We encode 4 base64 chars
@@ -110,7 +104,7 @@ void generateJobID(char *id, int ttl, int retry) {
  * The number is assumed to be stored in big endian format. For each byte
  * the first hex char is the most significative. If invalid digits are found
  * considered to be zero, however errno is set to EINVAL if this happens. */
-uint64_t hexToInt(char *p, size_t count) {
+uint64_t hexToInt(const char *p, size_t count) {
     uint64_t value = 0;
     char *charset = "0123456789abcdef";
 
@@ -142,24 +136,24 @@ uint64_t hexToInt(char *p, size_t count) {
  * greater than the other. So before comparing the node IDs, we mix the IDs
  * with the pseudorandom part of the Job ID, using the XOR function. This way
  * the comparision depends on the job. */
-int compareNodeIDsByJob(clusterNode *nodea, clusterNode *nodeb, job *j) {
+int compareNodeIDsByJob(const char *nodea, const char *nodeb, job *j) {
     int i;
-    char ida[CLUSTER_NAMELEN], idb[CLUSTER_NAMELEN];
-    memcpy(ida,nodea->name,CLUSTER_NAMELEN);
-    memcpy(idb,nodeb->name,CLUSTER_NAMELEN);
-    for (i = 0; i < CLUSTER_NAMELEN; i++) {
+    char ida[REDISMODULE_NODE_ID_LEN], idb[REDISMODULE_NODE_ID_LEN];
+    memcpy(ida,nodea,REDISMODULE_NODE_ID_LEN);
+    memcpy(idb,nodeb,REDISMODULE_NODE_ID_LEN);
+    for (i = 0; i < REDISMODULE_NODE_ID_LEN; i++) {
         /* The Job ID has 24 bytes of pseudo random bits starting at
          * offset 11. */
         ida[i] ^= j->id[11 + i%24];
         idb[i] ^= j->id[11 + i%24];
     }
-    return memcmp(ida,idb,CLUSTER_NAMELEN);
+    return memcmp(ida,idb,REDISMODULE_NODE_ID_LEN);
 }
 
 /* Return the raw TTL (in minutes) from a well-formed Job ID.
  * The caller should do sanity check on the job ID before calling this
  * function. Note that the 'id' field of a a job structure is always valid. */
-int getRawTTLFromJobID(char *id) {
+int getRawTTLFromJobID(const char *id) {
     return hexToInt(id+36,4);
 }
 
@@ -170,14 +164,14 @@ int getRawTTLFromJobID(char *id) {
 void setJobTTLFromID(job *job) {
     int expire_minutes = getRawTTLFromJobID(job->id);
     /* Convert back to absolute unix time. */
-    job->etime = server.unixtime + expire_minutes*60;
+    job->etime = time(NULL) + expire_minutes*60;
 }
 
 /* Validate the string 'id' as a job ID. 'len' is the number of bytes the
  * string is composed of. The function just checks length and prefix/suffix.
  * It's pretty pointless to use more CPU to validate it better since anyway
  * the lookup will fail. */
-int validateJobID(char *id, size_t len) {
+int validateJobID(const char *id, size_t len) {
     if (len != JOB_ID_LEN) return C_ERR;
     if (id[0] != 'D' ||
         id[1] != '-' ||
@@ -188,10 +182,10 @@ int validateJobID(char *id, size_t len) {
 
 /* Like validateJobID() but if the ID is invalid an error message is sent
  * to the client 'c' if not NULL. */
-int validateJobIdOrReply(client *c, char *id, size_t len) {
+int validateJobIdOrReply(RedisModuleCtx *ctx, const char *id, size_t len) {
     int retval = validateJobID(id,len);
-    if (retval == C_ERR && c)
-        addReplySds(c,sdsnew("-BADID Invalid Job ID format.\r\n"));
+    if (retval == C_ERR && ctx)
+        RedisModule_ReplyWithError(ctx,"-BADID Invalid Job ID format");
     return retval;
 }
 
@@ -201,8 +195,8 @@ int validateJobIdOrReply(client *c, char *id, size_t len) {
  *
  * This function only creates the job without any body, the only populated
  * fields are the ID and the state. */
-job *createJob(char *id, int state, int ttl, int retry) {
-    job *j = zmalloc(sizeof(job));
+job *createJob(const char *id, int state, int ttl, int retry) {
+    job *j = RedisModule_Alloc(sizeof(job));
 
     /* Generate a new Job ID if not specified by the caller. */
     if (id == NULL)
@@ -215,24 +209,25 @@ job *createJob(char *id, int state, int ttl, int retry) {
     j->gc_retry = 0;
     j->flags = 0;
     j->body = NULL;
-    j->nodes_delivered = dictCreate(&clusterNodesDictType,NULL);
+    j->nodes_delivered = raxNew();
     j->nodes_confirmed = NULL; /* Only created later on-demand. */
     j->awakeme = 0; /* Not yet registered in awakeme skiplist. */
     /* Number of NACKs and additiona deliveries start at zero and
      * are incremented as QUEUED messages are received or sent. */
     j->num_nacks = 0;
     j->num_deliv = 0;
+    j->bc = NULL;
     return j;
 }
 
 /* Free a job. Does not automatically unregister it. */
 void freeJob(job *j) {
     if (j == NULL) return;
-    if (j->queue) decrRefCount(j->queue);
-    sdsfree(j->body);
-    if (j->nodes_delivered) dictRelease(j->nodes_delivered);
-    if (j->nodes_confirmed) dictRelease(j->nodes_confirmed);
-    zfree(j);
+    if (j->queue) sdsfree(j->queue);
+    if (j->body) sdsfree(j->body);
+    if (j->nodes_delivered) raxFree(j->nodes_delivered);
+    if (j->nodes_confirmed) raxFree(j->nodes_confirmed);
+    RedisModule_Free(j);
 }
 
 /* Add the job in the jobs hash table, so that we can use lookupJob()
@@ -243,23 +238,23 @@ void freeJob(job *j) {
  * specified ID, no operation is performed and the function returns
  * C_ERR. */
 int registerJob(job *j) {
-    int retval = dictAdd(server.jobs, j->id, NULL);
-    if (retval == DICT_ERR) return C_ERR;
-
+    if (raxFind(Jobs, (unsigned char*)j->id, JOB_ID_LEN) != raxNotFound)
+        return C_ERR;
+    raxInsert(Jobs, (unsigned char*)j->id, JOB_ID_LEN, j, NULL);
     updateJobAwakeTime(j,0);
     return C_OK;
 }
 
 /* Lookup a job by ID. */
-job *lookupJob(char *id) {
-    struct dictEntry *de = dictFind(server.jobs, id);
-    return de ? dictGetKey(de) : NULL;
+job *lookupJob(const char *id) {
+    job *j = raxFind(Jobs, (unsigned char*)id, JOB_ID_LEN);
+    return j != raxNotFound ? j : NULL;
 }
 
 /* Remove job references from the system, without freeing the job itself.
  * If the job was already unregistered, C_ERR is returned, otherwise
  * C_OK is returned. */
-int unregisterJob(job *j) {
+int unregisterJob(RedisModuleCtx *ctx, job *j) {
     j = lookupJob(j->id);
     if (!j) return C_ERR;
 
@@ -269,7 +264,7 @@ int unregisterJob(job *j) {
         AOFDelJob(j);
 
     /* Remove from awake skip list. */
-    if (j->awakeme) serverAssert(skiplistDelete(server.awakeme,j));
+    if (j->awakeme) RedisModule_Assert(skiplistDelete(AwakeList,j));
 
     /* If the job is queued, remove from queue. */
     if (j->state == JOB_STATE_QUEUED) dequeueJob(j);
@@ -278,38 +273,25 @@ int unregisterJob(job *j) {
      * got deleted, and unblock it. This should only happen when the job
      * gets expired before the requested replication level is reached. */
     if (j->state == JOB_STATE_WAIT_REPL) {
-        client *c = jobGetAssociatedValue(j);
-        setJobAssociatedValue(j,NULL);
-        addReplySds(c,
-            sdsnew("-NOREPL job removed (expired?) before the requested "
-                   "replication level was achieved\r\n"));
-        /* Change job state otherwise unblockClientWaitingJobRepl() will
-         * try to remove the job itself. */
-        j->state = JOB_STATE_ACTIVE;
-        clusterBroadcastDelJob(j);
-        unblockClient(c);
+        RedisModuleBlockedClient *bc = j->bc;
+        if (bc) {
+            RedisModuleCtx *tsc = RedisModule_GetThreadSafeContext(bc);
+            j->bc = NULL;
+            RedisModule_ReplyWithError(tsc,
+                "-NOREPL job removed (expired?) before the requested "
+                "replication level was achieved");
+            /* Change job state otherwise unblockClientWaitingJobRepl() will
+             * try to remove the job itself. */
+            j->state = JOB_STATE_ACTIVE;
+            RedisModule_FreeThreadSafeContext(tsc);
+            RedisModule_UnblockClient(bc,NULL);
+        }
+        clusterBroadcastDelJob(ctx,j);
     }
 
-    /* Remove the job from the jobs hash table. */
-    dictDelete(server.jobs, j->id);
+    /* Remove the job from the dictionary of jobs. */
+    raxRemove(Jobs, (unsigned char*)j->id, JOB_ID_LEN, NULL);
     return C_OK;
-}
-
-/* We use the server.jobs hash table in a space efficient way by storing the
- * job only at 'key' pointer, so the 'value' pointer is free to be used
- * for state specific associated information.
- *
- * When the job state is JOB_STATE_WAIT_REPL, the value is set to the client
- * that is waiting for synchronous replication of the job. */
-void setJobAssociatedValue(job *j, void *val) {
-    struct dictEntry *de = dictFind(server.jobs, j->id);
-    if (de) dictSetVal(server.jobs,de,val);
-}
-
-/* See setJobAssociatedValue() top comment. */
-void *jobGetAssociatedValue(job *j) {
-    struct dictEntry *de = dictFind(server.jobs, j->id);
-    return de ? dictGetVal(de) : NULL;
 }
 
 /* Return the job state as a C string pointer. This is mainly useful for
@@ -385,11 +367,11 @@ void updateJobAwakeTime(job *j, mstime_t at) {
     if (at != j->awakeme) {
         /* Remove from skip list. */
         if (j->awakeme) {
-            serverAssert(skiplistDelete(server.awakeme,j));
+            RedisModule_Assert(skiplistDelete(AwakeList,j));
         }
         /* Insert it back again in the skip list with the new awake time. */
         j->awakeme = at;
-        skiplistInsert(server.awakeme,j);
+        skiplistInsert(AwakeList,j);
     }
 }
 
@@ -415,9 +397,9 @@ int skiplistCompareJobsToAwake(const void *a, const void *b) {
 }
 
 /* Used to show jobs info for debugging or under unexpected conditions. */
-void logJobsDebugInfo(int level, char *msg, job *j) {
-    serverLog(level,
-        "%s %.*s: state=%d retry=%d delay=%d replicate=%d flags=%d now=%lld cached_now=%lld awake=%lld (%lld) qtime=%lld etime=%lld",
+void logJobsDebugInfo(RedisModuleCtx *ctx, char *level, char *msg, job *j) {
+    RedisModule_Log(ctx,level,
+        "%s %.*s: state=%d retry=%d delay=%d replicate=%d flags=%d now=%lld awake=%lld (%lld) qtime=%lld etime=%lld",
         msg,
         JOB_ID_LEN, j->id,
         (int)j->state,
@@ -426,7 +408,6 @@ void logJobsDebugInfo(int level, char *msg, job *j) {
         (int)j->repl,
         (int)j->flags,
         (long long)mstime(),
-        (long long)server.mstime,
         (long long)j->awakeme-mstime(),
         (long long)j->awakeme,
         (long long)j->qtime-mstime(),
@@ -436,15 +417,17 @@ void logJobsDebugInfo(int level, char *msg, job *j) {
 
 /* Process the specified job to perform asynchronous operations on it.
  * Check processJobs() for more info. */
-void processJob(job *j) {
+void processJob(RedisModuleCtx *ctx, job *j) {
     mstime_t old_awakeme = j->awakeme;
+    mstime_t now_ms = mstime();
+    time_t now = now_ms / 1000;
 
-    logJobsDebugInfo(LL_VERBOSE,"PROCESSING",j);
+    logJobsDebugInfo(ctx,"verbose","PROCESSING",j);
 
     /* Remove expired jobs. */
-    if (j->etime <= server.unixtime) {
-        serverLog(LL_VERBOSE,"EVICT %.*s", JOB_ID_LEN, j->id);
-        unregisterJob(j);
+    if (j->etime <= now) {
+        RedisModule_Log(ctx,"verbose","EVICT %.*s", JOB_ID_LEN, j->id);
+        unregisterJob(ctx,j);
         freeJob(j);
         return;
     }
@@ -454,9 +437,9 @@ void processJob(job *j) {
     if ((j->state == JOB_STATE_ACTIVE ||
          j->state == JOB_STATE_QUEUED) &&
          j->flags & JOB_FLAG_BCAST_WILLQUEUE &&
-         j->qtime-JOB_WILLQUEUE_ADVANCE <= server.mstime)
+         j->qtime-JOB_WILLQUEUE_ADVANCE <= now_ms)
     {
-        if (j->state != JOB_STATE_QUEUED) clusterSendWillQueue(j);
+        if (j->state != JOB_STATE_QUEUED) clusterSendWillQueue(ctx,j);
         /* Clear the WILLQUEUE flag, so that the job will be rescheduled
          * for when we need to queue it (otherwise it is scheduled
          * JOB_WILLQUEUE_ADVANCE milliseconds before). */
@@ -467,7 +450,7 @@ void processJob(job *j) {
     /* Requeue job if needed. This will also care about putting the job
      * into the queue for the first time for delayed jobs, including the
      * ones with retry=0. */
-    if (j->state == JOB_STATE_ACTIVE && j->qtime <= server.mstime) {
+    if (j->state == JOB_STATE_ACTIVE && j->qtime <= now_ms) {
         queue *q;
 
         /* We need to check if the queue is paused in input. If that's
@@ -479,23 +462,23 @@ void processJob(job *j) {
          * will never be queued again, and we are the only owner.
          * In such a case, put it into the queue, or the job will be leaked. */
         if (j->retry != 0 &&
-            (q = lookupQueue(j->queue)) != NULL &&
-            q->flags & QUEUE_FLAG_PAUSED_IN)
+            (q = lookupQueue(j->queue,sdslen(j->queue))) != NULL &&
+             q->flags & QUEUE_FLAG_PAUSED_IN)
         {
-            updateJobRequeueTime(j,server.mstime+
+            updateJobRequeueTime(j,now_ms+
                                  j->retry*1000+
                                  randomTimeError(DISQUE_TIME_ERR));
         } else {
-            enqueueJob(j,0);
+            enqueueJob(ctx,j,0);
         }
     }
 
     /* Update job re-queue time if job is already queued. */
-    if (j->state == JOB_STATE_QUEUED && j->qtime <= server.mstime &&
+    if (j->state == JOB_STATE_QUEUED && j->qtime <= now_ms &&
         j->retry)
     {
         j->flags |= JOB_FLAG_BCAST_WILLQUEUE;
-        j->qtime = server.mstime +
+        j->qtime = now_ms +
                    j->retry*1000 +
                    randomTimeError(DISQUE_TIME_ERR);
         updateJobAwakeTime(j,0);
@@ -503,44 +486,40 @@ void processJob(job *j) {
 
     /* Try a job garbage collection. */
     if (j->state == JOB_STATE_ACKED) {
-        tryJobGC(j);
+        tryJobGC(ctx,j);
         updateJobAwakeTime(j,0);
     }
 
     if (old_awakeme == j->awakeme)
-        logJobsDebugInfo(LL_WARNING, "~~~WARNING~~~ NOT PROCESSABLE JOB", j);
+        logJobsDebugInfo(ctx,"warning", "~~~WARNING~~~ NOT PROCESSABLE JOB", j);
 }
 
-int processJobs(struct aeEventLoop *eventLoop, long long id, void *clientData) {
+void processJobs(RedisModuleCtx *ctx, void *clientData) {
     int period = 100; /* 100 ms default period. */
     int max = 10000; /* 10k jobs * 1000 milliseconds = 10M jobs/sec max. */
-    mstime_t now = mstime(), latency;
+    mstime_t now_ms = mstime();
     skiplistNode *current, *next;
-    UNUSED(eventLoop);
-    UNUSED(id);
     UNUSED(clientData);
 
 #ifdef DEBUG_SCHEDULER
     static time_t last_log = 0;
     int canlog = 0;
-    if (server.port == 25000 && time(NULL) != last_log) {
+    if (time(NULL) != last_log) {
         last_log = time(NULL);
         canlog = 1;
     }
 
-    if (canlog) printf("--- LEN: %d ---\n",
-        (int) skiplistLength(server.awakeme));
+    if (canlog) RedisModule_Log(ctx,"verbose","--- LEN: %d ---",
+        (int) skiplistLength(AwakeList));
 #endif
 
-    latencyStartMonitor(latency);
-    server.mstime = now; /* Update it since it's used by processJob(). */
-    current = server.awakeme->header->level[0].forward;
+    current = AwakeList->header->level[0].forward;
     while(current && max--) {
         job *j = current->obj;
 
 #ifdef DEBUG_SCHEDULER
         if (canlog) {
-            printf("%.*s %d (in %d) [%s]\n",
+            RedisModule_Log(ctx,"verbose","%.*s %d (in %d) [%s]",
                 JOB_ID_LEN, j->id,
                 (int) j->awakeme,
                 (int) (j->awakeme-server.mstime),
@@ -548,9 +527,9 @@ int processJobs(struct aeEventLoop *eventLoop, long long id, void *clientData) {
         }
 #endif
 
-        if (j->awakeme > now) break;
+        if (j->awakeme > now_ms) break;
         next = current->level[0].forward;
-        processJob(j);
+        processJob(ctx,j);
         current = next;
     }
 
@@ -558,19 +537,18 @@ int processJobs(struct aeEventLoop *eventLoop, long long id, void *clientData) {
      * in time is the next async event to process. Note that because of
      * received commands or change in state jobs state may be modified so
      * we set a max time of 100 milliseconds to wakeup anyway. */
-    current = server.awakeme->header->level[0].forward;
+    current = AwakeList->header->level[0].forward;
     if (current) {
         job *j = current->obj;
-        period = server.mstime-j->awakeme;
+        period = now_ms - j->awakeme;
         if (period < 1) period = 1;
         else if (period > 100) period = 100;
     }
-    latencyEndMonitor(latency);
-    latencyAddSampleIfNeeded("jobs-processing",latency);
 #ifdef DEBUG_SCHEDULER
-    if (canlog) printf("---\n\n");
+    if (canlog) RedisModule_Log(ctx,"verbose","---");
 #endif
-    return period;
+
+    RedisModule_CreateTimer(ctx,period,processJobs,NULL);
 }
 
 /* ---------------------------  Jobs serialization -------------------------- */
@@ -649,11 +627,11 @@ sds serializeJob(sds jobs, job *j, int sertype) {
     len = 4;                    /* Prefixed length of the serialized bytes. */
     len += JOB_STRUCT_SER_LEN;  /* Structure header directly serializable. */
     len += 4;                   /* Queue name length field. */
-    len += j->queue ? sdslen(j->queue->ptr) : 0; /* Queue name bytes. */
+    len += j->queue ? sdslen(j->queue) : 0; /* Queue name bytes. */
     len += 4;                   /* Body length field. */
     len += j->body ? sdslen(j->body) : 0; /* Body bytes. */
     len += 4;                   /* Node IDs (that may have a copy) count. */
-    len += dictSize(j->nodes_delivered) * CLUSTER_NAMELEN;
+    len += raxSize(j->nodes_delivered) * REDISMODULE_NODE_ID_LEN;
 
     /* Make room at the end of the SDS buffer to hold our message. */
     jobs = sdsMakeRoomFor(jobs,len);
@@ -673,9 +651,10 @@ sds serializeJob(sds jobs, job *j, int sertype) {
     /* Use a relative expire time for serialization, but only for the
      * type SER_MESSAGE. When we want to target storage, it's better to use
      * absolute times in every field. */
+    time_t now = time(NULL);
     if (sertype == SER_MESSAGE) {
-        if (sj->etime >= server.unixtime)
-            sj->etime = sj->etime - server.unixtime + 1;
+        if (sj->etime >= now)
+            sj->etime = sj->etime - now + 1;
         else
             sj->etime = 1;
         sj->flags &= ~JOB_FLAG_DELIVERED;
@@ -690,28 +669,28 @@ sds serializeJob(sds jobs, job *j, int sertype) {
     p = msg + 4 + JOB_STRUCT_SER_LEN;
 
     /* Queue name is 4 bytes prefixed len in little endian + actual bytes. */
-    p = serializeSdsString(p,j->queue ? j->queue->ptr : NULL);
+    p = serializeSdsString(p,j->queue);
 
     /* Body is 4 bytes prefixed len in little endian + actual bytes. */
     p = serializeSdsString(p,j->body);
 
     /* Node IDs that may have a copy of the message: 4 bytes count in little
-     * endian plus (count * CLUSTER_NAMELEN) bytes. */
-    count = intrev32ifbe(dictSize(j->nodes_delivered));
+     * endian plus (count * REDISMODULE_NODE_ID_LEN) bytes. */
+    count = intrev32ifbe(raxSize(j->nodes_delivered));
     memcpy(p,&count,sizeof(count));
     p += sizeof(count);
 
-    dictIterator *di = dictGetSafeIterator(j->nodes_delivered);
-    dictEntry *de;
-    while((de = dictNext(di)) != NULL) {
-        clusterNode *node = dictGetVal(de);
-        memcpy(p,node->name,CLUSTER_NAMELEN);
-        p += CLUSTER_NAMELEN;
+    raxIterator ri;
+    raxStart(&ri,j->nodes_delivered);
+    raxSeek(&ri,"^",NULL,0);
+    while(raxNext(&ri)) {
+        memcpy(p,ri.key,ri.key_len);
+        p += REDISMODULE_NODE_ID_LEN;
     }
-    dictReleaseIterator(di);
+    raxStop(&ri);
 
     /* Make sure we wrote exactly the intented number of bytes. */
-    serverAssert(len == (size_t)(p-msg));
+    RedisModule_Assert(len == (size_t)(p-msg));
     return jobs;
 }
 
@@ -738,8 +717,8 @@ sds serializeJob(sds jobs, job *j, int sertype) {
  * to JOB_STATE_ACTIVE.
  *
  * In both cases the gc retry field is reset to 0. */
-job *deserializeJob(unsigned char *p, size_t len, unsigned char **next, int sertype) {
-    job *j = zcalloc(sizeof(*j));
+job *deserializeJob(RedisModuleCtx *ctx, unsigned char *p, size_t len, unsigned char **next, int sertype) {
+    job *j = RedisModule_Calloc(1,sizeof(*j));
     unsigned char *start = p; /* To check total processed bytes later. */
     uint32_t joblen, aux;
 
@@ -761,7 +740,7 @@ job *deserializeJob(unsigned char *p, size_t len, unsigned char **next, int sert
     memrev32ifbe(j->etime);
     if (sertype == SER_MESSAGE) {
         /* Convert back to absolute time if needed. */
-        j->etime = server.unixtime + j->etime;
+        j->etime = time(NULL) + j->etime;
     }
     memrev32ifbe(j->delay);
     memrev32ifbe(j->retry);
@@ -780,7 +759,7 @@ job *deserializeJob(unsigned char *p, size_t len, unsigned char **next, int sert
     /* Compute next queue time from known parameters. */
     if (j->retry) {
         j->flags |= JOB_FLAG_BCAST_WILLQUEUE;
-        j->qtime = server.mstime +
+        j->qtime = mstime() +
                    j->delay*1000 +
                    j->retry*1000 +
                    randomTimeError(DISQUE_TIME_ERR);
@@ -795,7 +774,7 @@ job *deserializeJob(unsigned char *p, size_t len, unsigned char **next, int sert
     aux = intrev32ifbe(aux);
 
     if (len < aux) goto fmterr;
-    j->queue = createStringObject((char*)p,aux);
+    j->queue = sdsnewlen((char*)p,aux);
     p += aux;
     len -= aux;
 
@@ -816,13 +795,16 @@ job *deserializeJob(unsigned char *p, size_t len, unsigned char **next, int sert
     len -= sizeof(aux);
     aux = intrev32ifbe(aux);
 
-    if (len < aux*CLUSTER_NAMELEN) goto fmterr;
-    j->nodes_delivered = dictCreate(&clusterNodesDictType,NULL);
+    if (len < aux*REDISMODULE_NODE_ID_LEN) goto fmterr;
+    j->nodes_delivered = raxNew();
     while(aux--) {
-        clusterNode *node = clusterLookupNode((char*)p);
-        if (node) dictAdd(j->nodes_delivered,node->name,node);
-        p += CLUSTER_NAMELEN;
-        len -= CLUSTER_NAMELEN;
+        if (RedisModule_GetClusterNodeInfo(ctx,(char*)p,NULL,NULL,NULL,NULL) !=
+            REDISMODULE_ERR)
+        {
+            raxInsert(j->nodes_delivered,p,REDISMODULE_NODE_ID_LEN,NULL,NULL);
+        }
+        p += REDISMODULE_NODE_ID_LEN;
+        len -= REDISMODULE_NODE_ID_LEN;
     }
 
     if ((uint32_t)(p-start)-sizeof(joblen) != joblen) goto fmterr;
@@ -842,37 +824,13 @@ void updateJobNodes(job *j) {
     job *old = lookupJob(j->id);
     if (!old) return;
 
-    dictIterator *di = dictGetIterator(j->nodes_delivered);
-    dictEntry *de;
-
-    while((de = dictNext(di)) != NULL) {
-        clusterNode *node = dictGetVal(de);
-        dictAdd(old->nodes_delivered,node->name,node);
+    raxIterator ri;
+    raxStart(&ri,j->nodes_delivered);
+    raxSeek(&ri,"^",NULL,0);
+    while(raxNext(&ri)) {
+        raxInsert(old->nodes_delivered,ri.key,ri.key_len,NULL,NULL);
     }
-    dictReleaseIterator(di);
-}
-
-/* -------------------------  Jobs cluster functions ------------------------ */
-
-/* This function sends a DELJOB message to all the nodes that may have
- * a copy of the job, in order to trigger deletion of the job.
- * It is used when an ADDJOB command time out to unregister (in a best
- * effort way, without gurantees) the job, and in the ACKs grabage
- * collection procedure.
- *
- * This function also unregisters and releases the job from the local
- * node.
- *
- * The function is best effort, and does not need to *guarantee* that the
- * specific property that after it gets called, no copy of the job is found
- * on the cluster. It just attempts to avoid useless multiple deliveries,
- * and to free memory of jobs that are already processed or that were never
- * confirmed to the producer.
- */
-void deleteJobFromCluster(job *j) {
-    clusterBroadcastDelJob(j);
-    unregisterJob(j);
-    freeJob(j);
+    raxStop(&ri);
 }
 
 /* ----------------------------  Utility functions -------------------------- */
@@ -882,122 +840,80 @@ void deleteJobFromCluster(job *j) {
  *
  * When C_ERR is returned, an error is send to the client 'c' if not
  * NULL. */
-int validateJobIDs(client *c, robj **ids, int count) {
+int validateJobIDs(RedisModuleCtx *ctx, RedisModuleString **ids, int count) {
     int j;
 
     /* Mass-validate the Job IDs, so if we have to stop with an error, nothing
      * at all is processed. */
     for (j = 0; j < count; j++) {
-        if (validateJobIdOrReply(c,ids[j]->ptr,sdslen(ids[j]->ptr))
-            == C_ERR) return C_ERR;
+        size_t idlen;
+        const char *id = RedisModule_StringPtrLen(ids[j],&idlen);
+        if (validateJobIdOrReply(ctx,id,idlen) == C_ERR) return C_ERR;
     }
     return C_OK;
 }
 
-/* ----------------------------------  AOF ---------------------------------- */
-
-/* Emit a LOADJOB command into the AOF. which is used explicitly to load
- * serialized jobs form disk: LOADJOB <serialize-job-string>. */
-void AOFLoadJob(job *job) {
-    if (server.aof_state == AOF_OFF) return;
-
-    sds serialized = serializeJob(sdsempty(),job,SER_STORAGE);
-    robj *serobj = createObject(OBJ_STRING,serialized);
-    robj *argv[2] = {shared.loadjob, serobj};
-    feedAppendOnlyFile(argv,2);
-    decrRefCount(serobj);
-}
-
-/* Emit a DELJOB command into the AOF. This function is called in the following
- * two cases:
- *
- * 1) As a side effect of the job being acknowledged, when AOFAckJob()
- *    is called.
- * 2) When the server evicts a job from memory, but only if the state is one
- *    of active or queued. Yet not replicated jobs are not written into the
- *    AOF so there is no need to send a DELJOB, while already acknowledged
- *    jobs are handled by point "1". */
-void AOFDelJob(job *job) {
-    if (server.aof_state == AOF_OFF) return;
-
-    robj *jobid = createStringObject(job->id,JOB_ID_LEN);
-    robj *argv[2] = {shared.deljob, jobid};
-    feedAppendOnlyFile(argv,2);
-    decrRefCount(jobid);
-}
-
-/* Emit a DELJOB command, since ths is how we handle acknowledged jobs from
- * the point of view of AOF. We are not interested in loading back acknowledged
- * jobs, nor we include them on AOF rewrites, since ACKs garbage collection
- * works anyway if nodes forget about ACKs and dropping ACKs is not a safety
- * violation, it may just result into multiple deliveries of the same
- * message.
- *
- * However we keep the API separated, so it will be simple if we change our
- * mind or we want to have a feature to persist ACKs. */
-void AOFAckJob(job *job) {
-    if (server.aof_state == AOF_OFF) return;
-    AOFDelJob(job);
-}
-
-/* The LOADJOB command is emitted in the AOF to load serialized jobs at
- * restart, and is only processed while loading AOFs. Clients calling this
- * command get an error. */
-void loadjobCommand(client *c) {
-    if (!(c->flags & CLIENT_AOF_CLIENT)) {
-        addReplyError(c,"LOADJOB is a special command only processed from AOF");
-        return;
-    }
-    job *job = deserializeJob(c->argv[1]->ptr,sdslen(c->argv[1]->ptr),NULL,SER_STORAGE);
-
-    /* We expect to be able to read back what we serialized. */
-    if (job == NULL) {
-        serverLog(LL_WARNING,
-            "Unrecoverable error loading AOF: corrupted LOADJOB data.");
-        exit(1);
-    }
-
-    int enqueue_job = 0;
-    if (job->state == JOB_STATE_QUEUED) {
-        if (server.aof_enqueue_jobs_once) enqueue_job = 1;
-        job->state = JOB_STATE_ACTIVE;
-    }
-
-    /* Check if the job expired before registering it. */
-    if (job->etime <= server.unixtime) {
-        freeJob(job);
-        return;
-    }
-
-    /* Register the job, and if needed enqueue it: we put jobs back into
-     * queues only if enqueue-jobs-at-next-restart option is set, that is,
-     * when a controlled restart happens. */
-    if (registerJob(job) == C_OK && enqueue_job)
-        enqueueJob(job,0);
-}
-
 /* --------------------------  Jobs related commands ------------------------ */
 
-/* This is called by unblockClient() to perform the cleanup of a client
- * blocked by ADDJOB. Never call it directly, call unblockClient()
- * instead. */
-void unblockClientWaitingJobRepl(client *c) {
-    /* If the job is still waiting for synchronous replication, but the client
-     * waiting it gets freed or reaches the timeout, we unblock the client and
-     * forget about the job. */
-    if (c->bpop.job->state == JOB_STATE_WAIT_REPL) {
-        /* Set the job as active before calling deleteJobFromCluster() since
-         * otherwise unregistering the job will, in turn, unblock the client,
-         * which we are already doing here. */
-        c->bpop.job->state = JOB_STATE_ACTIVE;
-        deleteJobFromCluster(c->bpop.job);
+/* This is called when a client blocked in ADDJOB is unblocked. Our private
+ * data in this case is just a string holding the job ID. */
+void addjobClientFree(RedisModuleCtx *ctx, void *privdata) {
+    REDISMODULE_NOT_USED(ctx);
+    if (privdata) RedisModule_Free(privdata);
+}
+
+/* Called when a client blocked on ADDJOB disconnected before the timeout
+ * or the successful replication were reached. This is not called if the
+ * client timeout or was explicitly unblocked by the module.
+ *
+ * This is also called by the timeout handler in order to evict the job
+ * when the replication was not reached. */
+void addjobDisconnected(RedisModuleCtx *ctx, RedisModuleBlockedClient *bc) {
+    job *j = raxFind(BlockedOnRepl,(unsigned char*)&bc,sizeof(bc));
+    if (j != raxNotFound) {
+        raxRemove(BlockedOnRepl,(unsigned char*)&j->bc,sizeof(j->bc),NULL);
+        j->bc = NULL; /* Avoid that we try to unblock the client. */
+        unregisterJob(ctx,j);
+        freeJob(j);
     }
-    c->bpop.job = NULL;
+}
+
+/* Reply to ADDJOB client after we successful unblocked or timed out. */
+int addjobClientReply(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
+    REDISMODULE_NOT_USED(argv);
+    REDISMODULE_NOT_USED(argc);
+    RedisModuleBlockedClient *bc = RedisModule_GetBlockedClientHandle(ctx);
+    const char *id = RedisModule_GetBlockedClientPrivateData(ctx);
+    if (RedisModule_IsBlockedTimeoutRequest(ctx)) {
+        /* If we are here the job state is JOB_STATE_WAIT_REPL. */
+        RedisModule_ReplyWithNull(ctx);
+        addjobDisconnected(ctx,bc);
+    } else {
+        /* If we are here the job state is JOB_STATE_ACTIVE. */
+        if (id != NULL) RedisModule_ReplyWithStringBuffer(ctx,id,JOB_ID_LEN);
+        raxRemove(BlockedOnRepl,(unsigned char*)&bc,sizeof(bc),NULL);
+    }
+    return REDISMODULE_OK;
 }
 
 /* Return a simple string reply with the Job ID. */
-void addReplyJobID(client *c, job *j) {
-    addReplyStatusLength(c,j->id,JOB_ID_LEN);
+void addReplyJobID(RedisModuleCtx *ctx, job *j) {
+    RedisModule_ReplyWithStringBuffer(ctx,j->id,JOB_ID_LEN);
+}
+
+/* Send an ENQUEUE message to a random node among the ones that we believe
+ * have a copy. This is used when we want to discard a job but want it to
+ * be processed in a short time by another node, without waiting for the
+ * retry. */
+void clusterSendEnqueueToRandomNode(RedisModuleCtx *ctx, job *j) {
+    if (raxSize(j->nodes_confirmed) > 0) {
+        raxIterator ri;
+        raxStart(&ri,j->nodes_confirmed);
+        raxSeek(&ri,"^",NULL,0);
+        raxRandomWalk(&ri,0);
+        clusterSendEnqueue(ctx,(char*)ri.key,j,j->delay);
+        raxStop(&ri);
+    }
 }
 
 /* This function is called by cluster.c when the job was replicated
@@ -1006,8 +922,8 @@ void addReplyJobID(client *c, job *j) {
  * Here we need to queue the job, and unblock the client waiting for the job
  * if it still exists.
  *
- * This function is only called if the job is in JOB_STATE_WAIT_REPL.
- * The functionc an also assume that there is a client waiting to be
+ * This function is only called if the job is in JOB_STATE_WAIT_REPL state..
+ * The function also assumes that there is a client waiting to be
  * unblocked if this function is called, since if the blocked client is
  * released, the job is deleted (and a best effort try is made to remove
  * copies from other nodes), to avoid non acknowledged jobs to be active
@@ -1018,28 +934,26 @@ void addReplyJobID(client *c, job *j) {
  * function removes the job from the node, since the job is externally
  * replicated, C_ERR is returned, in order to signal the client further
  * accesses to the job are not allowed. */
-int jobReplicationAchieved(job *j) {
-    serverLog(LL_VERBOSE,"Replication ACHIEVED %.*s",JOB_ID_LEN,j->id);
+int jobReplicationAchieved(RedisModuleCtx *ctx, job *j) {
+    RedisModule_Log(ctx,"verbose","Replication ACHIEVED %.*s",JOB_ID_LEN,j->id);
 
     /* Change the job state to active. This is critical to avoid the job
      * will be freed by unblockClient() if found still in the old state. */
     j->state = JOB_STATE_ACTIVE;
 
     /* Reply to the blocked client with the Job ID and unblock the client. */
-    client *c = jobGetAssociatedValue(j);
-    setJobAssociatedValue(j,NULL);
-    addReplyJobID(c,j);
-    unblockClient(c);
+    RedisModuleBlockedClient *bc = j->bc;
+    j->bc = NULL;
+    char *id = RedisModule_Alloc(JOB_ID_LEN);
+    memcpy(id,j->id,JOB_ID_LEN);
+    RedisModule_UnblockClient(bc,id);
 
     /* If the job was externally replicated, send a QUEUE message to one of
      * the nodes that acknowledged to have a copy, and forget about it ASAP. */
-    if (dictFind(j->nodes_delivered,myself->name) == NULL) {
-        dictEntry *de = dictGetRandomKey(j->nodes_confirmed);
-        if (de) {
-            clusterNode *n = dictGetVal(de);
-            clusterSendEnqueue(n,j,j->delay);
-        }
-        unregisterJob(j);
+    const char *myself = RedisModule_GetMyClusterID();
+    if (raxFind(j->nodes_delivered,(unsigned char*)myself,REDISMODULE_NODE_ID_LEN) == raxNotFound) {
+        clusterSendEnqueueToRandomNode(ctx,j);
+        unregisterJob(ctx,j);
         freeJob(j);
         return C_ERR;
     }
@@ -1048,13 +962,13 @@ int jobReplicationAchieved(job *j) {
      * hash table again for ACKs tracking in order to garbage collect the
      * job once processed. */
     if (j->nodes_confirmed) {
-        dictRelease(j->nodes_confirmed);
+        raxFree(j->nodes_confirmed);
         j->nodes_confirmed = NULL;
     }
 
     /* Queue the job locally. */
     if (j->delay == 0)
-        enqueueJob(j,0); /* Will change the job state. */
+        enqueueJob(ctx,j,0); /* Will change the job state. */
     else
         updateJobAwakeTime(j,0); /* Queue with delay. */
 
@@ -1070,7 +984,12 @@ int jobReplicationAchieved(job *j) {
  * not accepting our job), we have a chance to make the ADDJOB call
  * succeed using other nodes.
  *
- * The function always returns 0 since it never terminates the client. */
+ * The function always returns 0 since it never terminates the client.
+ *
+ * XXX: for the module version of Disque there is to implement this
+ * in a different way, probably with a timer that checks on the job
+ * state. */
+#if 0
 #define DELAYED_JOB_ADD_NODE_MIN_PERIOD 50 /* 50 milliseconds. */
 int clientsCronHandleDelayedJobReplication(client *c) {
     /* Return ASAP if this client is not blocked for job replication. */
@@ -1087,6 +1006,40 @@ int clientsCronHandleDelayedJobReplication(client *c) {
             c->bpop.added_node_time = mstime();
     }
     return 0;
+}
+#endif
+
+/* Copy a Redis module string and return it as an SDS string. */
+sds RedisModule_StringToSds(RedisModuleString *s) {
+    size_t len;
+    const char *ptr = RedisModule_StringPtrLen(s,&len);
+    return sdsnewlen(ptr,len);
+}
+
+/* Utility function to parse timeouts in ADDJOB and other commands.
+ * The timeout is stored in '*timeout' in milliseconds, so the caller
+ * must specify the input 'unit'. On format errors the client associated
+ * with the context will receive an error, and REDISMODULE_ERR will be
+ * returned by the function. */
+int getTimeoutFromObjectOrReply(RedisModuleCtx *ctx, RedisModuleString *object, mstime_t *timeout, int unit) {
+    long long tval;
+
+    if (RedisModule_StringToLongLong(object,&tval) == REDISMODULE_ERR) {
+        RedisModule_ReplyWithError(ctx,
+            "timeout is not an integer or out of range");
+        return REDISMODULE_ERR;
+    }
+
+    if (tval < 0) {
+        RedisModule_ReplyWithError(ctx,
+            "timeout is negative");
+        return REDISMODULE_ERR;
+    }
+
+    if (tval > 0) if (unit == UNIT_SECONDS) tval *= 1000;
+    *timeout = tval;
+
+    return REDISMODULE_OK;
 }
 
 /* ADDJOB queue job timeout [REPLICATE <n>] [TTL <sec>] [RETRY <sec>] [ASYNC]
@@ -1109,18 +1062,23 @@ int clientsCronHandleDelayedJobReplication(client *c) {
  * 4) The job is discareded by the local node ASAP, that is, when the
  *    selected replication level is achieved or before to returning to
  *    the caller for asynchronous jobs. */
-void addjobCommand(client *c) {
-    long long replicate = server.cluster->size > 3 ? 3 : server.cluster->size;
+int addjobCommand(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
+    if (argc < 4) return RedisModule_WrongArity(ctx);
+
+    int cluster_size = RedisModule_GetClusterSize();
+    long long replicate = cluster_size > 3 ? 3 : cluster_size;
     long long ttl = 3600*24;
     long long retry = -1;
     long long delay = 0;
     long long maxlen = 0; /* Max queue length for job to be accepted. */
-    mstime_t timeout;
+    mstime_t timeout, now_ms = mstime();
     int j, retval;
     int async = 0;  /* Asynchronous request? */
-    int extrepl = getMemoryWarningLevel() > 0; /* Replicate externally? */
     int leaving = myselfLeaving();
     static uint64_t prev_ctime = 0;
+
+    /* Replicate externally? */
+    int extrepl = RedisModule_GetContextFlags(ctx) & REDISMODULE_CTX_FLAGS_OOM; 
 
     /* Another case for external replication, other than memory pressure, is
      * if this node is leaving the cluster. In this case we don't want to create
@@ -1128,70 +1086,70 @@ void addjobCommand(client *c) {
     if (leaving) extrepl = 1;
 
     /* Parse args. */
-    for (j = 4; j < c->argc; j++) {
-        char *opt = c->argv[j]->ptr;
-        int lastarg = j == c->argc-1;
+    for (j = 4; j < argc; j++) {
+        const char *opt = RedisModule_StringPtrLen(argv[j],NULL);
+        int lastarg = (j == argc-1);
         if (!strcasecmp(opt,"replicate") && !lastarg) {
-            retval = getLongLongFromObject(c->argv[j+1],&replicate);
-            if (retval != C_OK || replicate <= 0 || replicate > 65535) {
-                addReplyError(c,"REPLICATE must be between 1 and 65535");
-                return;
+            retval = RedisModule_StringToLongLong(argv[j+1],&replicate);
+            if (retval != REDISMODULE_OK || replicate <= 0 || replicate > 65535)
+            {
+                return RedisModule_ReplyWithError(ctx,
+                    "REPLICATE must be between 1 and 65535");
             }
             j++;
         } else if (!strcasecmp(opt,"ttl") && !lastarg) {
-            retval = getLongLongFromObject(c->argv[j+1],&ttl);
-            if (retval != C_OK || ttl <= 0) {
-                addReplyError(c,"TTL must be a number > 0");
-                return;
+            retval = RedisModule_StringToLongLong(argv[j+1],&ttl);
+            if (retval != REDISMODULE_OK || ttl <= 0) {
+                return RedisModule_ReplyWithError(ctx,
+                    "TTL must be a number > 0");
             }
             j++;
         } else if (!strcasecmp(opt,"retry") && !lastarg) {
-            retval = getLongLongFromObject(c->argv[j+1],&retry);
-            if (retval != C_OK || retry < 0) {
-                addReplyError(c,"RETRY time must be a non negative number");
-                return;
+            retval = RedisModule_StringToLongLong(argv[j+1],&retry);
+            if (retval != REDISMODULE_OK || retry < 0) {
+                return RedisModule_ReplyWithError(ctx,
+                    "RETRY time must be a non negative number");
             }
             j++;
         } else if (!strcasecmp(opt,"delay") && !lastarg) {
-            retval = getLongLongFromObject(c->argv[j+1],&delay);
-            if (retval != C_OK || delay < 0) {
-                addReplyError(c,"DELAY time must be a non negative number");
-                return;
+            retval = RedisModule_StringToLongLong(argv[j+1],&delay);
+            if (retval != REDISMODULE_OK || delay < 0) {
+                return RedisModule_ReplyWithError(ctx,
+                    "DELAY time must be a non negative number");
             }
             j++;
         } else if (!strcasecmp(opt,"maxlen") && !lastarg) {
-            retval = getLongLongFromObject(c->argv[j+1],&maxlen);
-            if (retval != C_OK || maxlen <= 0) {
-                addReplyError(c,"MAXLEN must be a positive number");
-                return;
+            retval = RedisModule_StringToLongLong(argv[j+1],&maxlen);
+            if (retval != REDISMODULE_OK || maxlen <= 0) {
+                return RedisModule_ReplyWithError(ctx,
+                    "MAXLEN must be a positive number");
             }
             j++;
         } else if (!strcasecmp(opt,"async")) {
             async = 1;
         } else {
-            addReply(c,shared.syntaxerr);
-            return;
+            return RedisModule_ReplyWithError(ctx,"Syntax error");
         }
     }
 
     /* Parse the timeout argument. */
-    if (getTimeoutFromObjectOrReply(c,c->argv[3],&timeout,UNIT_MILLISECONDS)
-        != C_OK) return;
+    if (getTimeoutFromObjectOrReply(ctx,argv[3],&timeout,UNIT_MILLISECONDS)
+        != REDISMODULE_OK) return REDISMODULE_OK;
 
     /* REPLICATE > 1 and RETRY set to 0 does not make sense, why to replicate
      * the job if it will never try to be re-queued if case the job processing
      * is not acknowledged? */
     if (replicate > 1 && retry == 0) {
-        addReplyError(c,"With RETRY set to 0 please explicitly set  "
-                        "REPLICATE to 1 (at-most-once delivery)");
-        return;
+       return RedisModule_ReplyWithError(ctx,
+            "With RETRY set to 0 please explicitly set  "
+            "REPLICATE to 1 (at-most-once delivery)");
     }
 
     /* DELAY greater or equal to TTL is silly. */
     if (delay >= ttl) {
-        addReplyError(c,"The specified DELAY is greater than TTL. Job refused "
-                        "since would never be delivered");
-        return;
+        return RedisModule_ReplyWithError(ctx,
+            "The specified DELAY is greater than TTL. Job refused "
+            "since would never be delivered");
     }
 
     /* When retry is not specified, it defaults to 1/10 of the TTL, with
@@ -1205,44 +1163,40 @@ void addjobCommand(client *c) {
     /* Check if REPLICATE can't be honoured at all. */
     int additional_nodes = extrepl ? replicate : replicate-1;
 
-    if (additional_nodes > server.cluster->reachable_nodes_count) {
+    if (additional_nodes > ClusterReachableNodesCount) {
         if (extrepl &&
-            additional_nodes-1 == server.cluster->reachable_nodes_count)
+            additional_nodes-1 == ClusterReachableNodesCount)
         {
-            addReplySds(c,
-                sdscatprintf(sdsempty(),
+            return RedisModule_ReplyWithError(ctx,
                        "-NOREPL Not enough reachable nodes "
                        "for the requested replication level, since I'm unable "
-                       "to hold a copy of the message for the following "
-                       "reason: %s\r\n",
-                       leaving ? "I'm leaving the cluster" :
-                                 "I'm out of memory"));
+                       "to hold a copy of the message (OOM or leaving the "
+                       "cluster)");
         } else {
-            addReplySds(c,
-                sdsnew("-NOREPL Not enough reachable nodes "
-                       "for the requested replication level\r\n"));
+            return RedisModule_ReplyWithError(ctx,
+                        "-NOREPL Not enough reachable nodes "
+                        "for the requested replication level");
         }
-        return;
     }
 
     /* Lookup the queue by the name, in order to perform checks for
      * MAXLEN and to check for paused queue. */
-    queue *q = lookupQueue(c->argv[1]);
+    size_t qnamelen;
+    const char *qname = RedisModule_StringPtrLen(argv[1],&qnamelen);
+    queue *q = lookupQueue(qname,qnamelen);
 
     /* If maxlen was specified, check that the local queue len is
      * within the requested limits. */
     if (maxlen && q && queueLength(q) >= (unsigned long) maxlen) {
-        addReplySds(c,
-            sdsnew("-MAXLEN Queue is already longer than "
-                   "the specified MAXLEN count\r\n"));
-        return;
+        return RedisModule_ReplyWithError(ctx,
+                "-MAXLEN Queue is already longer than "
+                "the specified MAXLEN count");
     }
 
     /* If the queue is paused in input, refuse the job. */
     if (q && q->flags & QUEUE_FLAG_PAUSED_IN) {
-        addReplySds(c,
-            sdsnew("-PAUSED Queue paused in input, try later\r\n"));
-        return;
+        return RedisModule_ReplyWithError(ctx,
+                "-PAUSED Queue paused in input, try later");
     }
 
     /* Are we going to discard the local copy before to return to the caller?
@@ -1250,50 +1204,52 @@ void addjobCommand(client *c) {
      * replicated AND because of memory warning level we are going to
      * replicate externally without taking a copy. */
     int discard_local_copy = async && extrepl;
+    const char *myself = RedisModule_GetMyClusterID();
 
     /* Create a new job. */
     job *job = createJob(NULL,JOB_STATE_WAIT_REPL,ttl,retry);
-    job->queue = c->argv[1];
-    incrRefCount(c->argv[1]);
+    job->queue = RedisModule_StringToSds(argv[1]);
     job->repl = replicate;
 
     /* If no external replication is used, add myself to the list of nodes
      * that have a copy of the job. */
-    if (!extrepl)
-        dictAdd(job->nodes_delivered,myself->name,myself);
+    if (!extrepl) {
+        raxInsert(job->nodes_delivered,(unsigned char*)myself,
+                  REDISMODULE_NODE_ID_LEN,NULL,NULL);
+    }
 
     /* Job ctime is milliseconds * 1000000. Jobs created in the same
      * millisecond gets an incremental ctime. The ctime is used to sort
      * queues, so we have some weak sorting semantics for jobs: non-requeued
      * jobs are delivered roughly in the order they are added into a given
      * node. */
-    job->ctime = mstime()*1000000;
+    job->ctime = now_ms*1000000;
     if (job->ctime <= prev_ctime) job->ctime = prev_ctime+1;
     prev_ctime = job->ctime;
 
-    job->etime = server.unixtime + ttl;
+    job->etime = now_ms/1000 + ttl;
     job->delay = delay;
     job->retry = retry;
-    job->body = sdsdup(c->argv[2]->ptr);
+    job->body = RedisModule_StringToSds(argv[2]);
 
     /* Set the next time the job will be queued. Note that once we call
      * enqueueJob() the first time, this will be set to 0 (never queue
      * again) for jobs that have a zero retry value (at most once jobs). */
     if (delay) {
-        job->qtime = server.mstime + delay*1000;
+        job->qtime = now_ms + delay*1000;
     } else {
         /* This will be updated anyway by enqueueJob(). */
-        job->qtime = server.mstime + retry*1000;
+        job->qtime = now_ms + retry*1000;
     }
 
     /* Register the job locally, unless we are going to remove it locally. */
     if (!discard_local_copy && registerJob(job) == C_ERR) {
         /* A job ID with the same name? Practically impossible but
          * let's handle it to trap possible bugs in a cleaner way. */
-        serverLog(LL_WARNING,"ID already existing in ADDJOB command!");
+        RedisModule_Log(ctx,"warning","ID already existing in ADDJOB command!");
         freeJob(job);
-        addReplyError(c,"Internal error creating the job, check server logs");
-        return;
+        return RedisModule_ReplyWithError(ctx,
+            "Internal error creating the job, check server logs");
     }
 
     /* For replicated messages where ASYNC option was not asked, block
@@ -1304,21 +1260,23 @@ void addjobCommand(client *c) {
      * Note that for REPLICATE > 1 and ASYNC the replication process is
      * best effort. */
     if ((replicate > 1 || extrepl) && !async) {
-        c->bpop.timeout = timeout;
-        c->bpop.job = job;
-        c->bpop.added_node_time = mstime();
-        blockClient(c,BLOCKED_JOB_REPL);
-        setJobAssociatedValue(job,c);
+        job->bc = RedisModule_BlockClient(ctx,addjobClientReply,addjobClientReply,addjobClientFree,timeout);
+        raxInsert(BlockedOnRepl,(unsigned char*)&job->bc,sizeof(job->bc),
+            job,NULL);
+        RedisModule_SetDisconnectCallback(job->bc,addjobDisconnected);
         /* Create the nodes_confirmed dictionary only if we actually need
          * it for synchronous replication. It will be released later
          * when we move away from JOB_STATE_WAIT_REPL. */
-        job->nodes_confirmed = dictCreate(&clusterNodesDictType,NULL);
+        job->nodes_confirmed = raxNew();
         /* Confirm itself as an acknowledged receiver if this node will
          * retain a copy of the job. */
-        if (!extrepl) dictAdd(job->nodes_confirmed,myself->name,myself);
+        if (!extrepl) {
+            raxInsert(job->nodes_confirmed,(unsigned char*)myself,
+                      REDISMODULE_NODE_ID_LEN,NULL,NULL);
+        }
     } else {
         if (job->delay == 0) {
-            if (!extrepl) enqueueJob(job,0); /* Will change the job state. */
+            if (!extrepl) enqueueJob(ctx,job,0); /* Will change the job state */
         } else {
             /* Delayed jobs that don't wait for replication can move
              * forward to ACTIVE state ASAP, and get scheduled for
@@ -1326,123 +1284,129 @@ void addjobCommand(client *c) {
             job->state = JOB_STATE_ACTIVE;
             if (!discard_local_copy) updateJobAwakeTime(job,0);
         }
-        addReplyJobID(c,job);
+        addReplyJobID(ctx,job);
         if (!extrepl) AOFLoadJob(job);
     }
 
     /* If the replication factor is > 1, send REPLJOB messages to REPLICATE-1
      * nodes. */
     if (additional_nodes > 0)
-        clusterReplicateJob(job, additional_nodes, async);
+        clusterReplicateJob(ctx, job, additional_nodes, async);
 
     /* If the job is asynchronously and externally replicated at the same time,
      * send an ENQUEUE message ASAP to one random node, and delete the job from
      * this node right now. */
     if (discard_local_copy) {
-        dictEntry *de = dictGetRandomKey(job->nodes_delivered);
-        if (de) {
-            clusterNode *n = dictGetVal(de);
-            clusterSendEnqueue(n,job,job->delay);
-        }
+        clusterSendEnqueueToRandomNode(ctx,job);
         /* We don't have to unregister the job since we did not registered
          * it if it's async + extrepl. */
         freeJob(job);
     }
+    return REDISMODULE_OK;
 }
 
 /* Client reply function for SHOW and JSCAN. */
-void addReplyJobInfo(client *c, job *j) {
-    addReplyMultiBulkLen(c,30);
+void addReplyJobInfo(RedisModuleCtx *ctx, job *j) {
+    RedisModule_ReplyWithArray(ctx,30);
 
-    addReplyBulkCString(c,"id");
-    addReplyBulkCBuffer(c,j->id,JOB_ID_LEN);
+    RedisModule_ReplyWithSimpleString(ctx,"id");
+    RedisModule_ReplyWithStringBuffer(ctx,j->id,JOB_ID_LEN);
 
-    addReplyBulkCString(c,"queue");
+    RedisModule_ReplyWithSimpleString(ctx,"queue");
     if (j->queue)
-        addReplyBulk(c,j->queue);
+        RedisModule_ReplyWithStringBuffer(ctx,j->queue,sdslen(j->queue));
     else
-        addReply(c,shared.nullbulk);
+        RedisModule_ReplyWithNull(ctx);
 
-    addReplyBulkCString(c,"state");
-    addReplyBulkCString(c,jobStateToString(j->state));
+    RedisModule_ReplyWithSimpleString(ctx,"state");
+    RedisModule_ReplyWithSimpleString(ctx,jobStateToString(j->state));
 
-    addReplyBulkCString(c,"repl");
-    addReplyLongLong(c,j->repl);
+    RedisModule_ReplyWithSimpleString(ctx,"repl");
+    RedisModule_ReplyWithLongLong(ctx,j->repl);
 
     int64_t ttl = j->etime - time(NULL);
     if (ttl < 0) ttl = 0;
-    addReplyBulkCString(c,"ttl");
-    addReplyLongLong(c,ttl);
+    RedisModule_ReplyWithSimpleString(ctx,"ttl");
+    RedisModule_ReplyWithLongLong(ctx,ttl);
 
-    addReplyBulkCString(c,"ctime");
-    addReplyLongLong(c,j->ctime);
+    RedisModule_ReplyWithSimpleString(ctx,"ctime");
+    RedisModule_ReplyWithLongLong(ctx,j->ctime);
 
-    addReplyBulkCString(c,"delay");
-    addReplyLongLong(c,j->delay);
+    RedisModule_ReplyWithSimpleString(ctx,"delay");
+    RedisModule_ReplyWithLongLong(ctx,j->delay);
 
-    addReplyBulkCString(c,"retry");
-    addReplyLongLong(c,j->retry);
+    RedisModule_ReplyWithSimpleString(ctx,"retry");
+    RedisModule_ReplyWithLongLong(ctx,j->retry);
 
-    addReplyBulkCString(c,"nacks");
-    addReplyLongLong(c,j->num_nacks);
+    RedisModule_ReplyWithSimpleString(ctx,"nacks");
+    RedisModule_ReplyWithLongLong(ctx,j->num_nacks);
 
-    addReplyBulkCString(c,"additional-deliveries");
-    addReplyLongLong(c,j->num_deliv);
+    RedisModule_ReplyWithSimpleString(ctx,"additional-deliveries");
+    RedisModule_ReplyWithLongLong(ctx,j->num_deliv);
 
-    addReplyBulkCString(c,"nodes-delivered");
+    RedisModule_ReplyWithSimpleString(ctx,"nodes-delivered");
     if (j->nodes_delivered) {
-        addReplyMultiBulkLen(c,dictSize(j->nodes_delivered));
-        dictForeach(j->nodes_delivered,de)
-            addReplyBulkCBuffer(c,dictGetKey(de),CLUSTER_NAMELEN);
-        dictEndForeach
+        RedisModule_ReplyWithArray(ctx,raxSize(j->nodes_delivered));
+        raxIterator ri;
+        raxStart(&ri,j->nodes_delivered);
+        raxSeek(&ri,"^",NULL,0);
+        while(raxNext(&ri)) {
+            RedisModule_ReplyWithStringBuffer(ctx,(char*)ri.key,ri.key_len);
+        }
+        raxStop(&ri);
     } else {
-        addReplyMultiBulkLen(c,0);
+        RedisModule_ReplyWithArray(ctx,0);
     }
 
-    addReplyBulkCString(c,"nodes-confirmed");
+    RedisModule_ReplyWithSimpleString(ctx,"nodes-confirmed");
     if (j->nodes_confirmed) {
-        addReplyMultiBulkLen(c,dictSize(j->nodes_confirmed));
-        dictForeach(j->nodes_confirmed,de)
-            addReplyBulkCBuffer(c,dictGetKey(de),CLUSTER_NAMELEN);
-        dictEndForeach
+        RedisModule_ReplyWithArray(ctx,raxSize(j->nodes_confirmed));
+        raxIterator ri;
+        raxStart(&ri,j->nodes_confirmed);
+        raxSeek(&ri,"^",NULL,0);
+        while(raxNext(&ri)) {
+            RedisModule_ReplyWithStringBuffer(ctx,(char*)ri.key,ri.key_len);
+        }
+        raxStop(&ri);
     } else {
-        addReplyMultiBulkLen(c,0);
+        RedisModule_ReplyWithArray(ctx,0);
     }
 
     mstime_t next_requeue = j->qtime - mstime();
     if (next_requeue < 0) next_requeue = 0;
-    addReplyBulkCString(c,"next-requeue-within");
+    RedisModule_ReplyWithSimpleString(ctx,"next-requeue-within");
     if (j->qtime == 0)
-        addReply(c,shared.nullbulk);
+        RedisModule_ReplyWithNull(ctx);
     else
-        addReplyLongLong(c,next_requeue);
+        RedisModule_ReplyWithLongLong(ctx,next_requeue);
 
     mstime_t next_awake = j->awakeme - mstime();
     if (next_awake < 0) next_awake = 0;
-    addReplyBulkCString(c,"next-awake-within");
+    RedisModule_ReplyWithSimpleString(ctx,"next-awake-within");
     if (j->awakeme == 0)
-        addReply(c,shared.nullbulk);
+        RedisModule_ReplyWithNull(ctx);
     else
-        addReplyLongLong(c,next_awake);
+        RedisModule_ReplyWithLongLong(ctx,next_awake);
 
-    addReplyBulkCString(c,"body");
+    RedisModule_ReplyWithSimpleString(ctx,"body");
     if (j->body)
-        addReplyBulkCBuffer(c,j->body,sdslen(j->body));
+        RedisModule_ReplyWithStringBuffer(ctx,j->body,sdslen(j->body));
     else
-        addReply(c,shared.nullbulk);
+        RedisModule_ReplyWithNull(ctx);
 }
 
 /* SHOW <job-id> */
-void showCommand(client *c) {
-    if (validateJobIdOrReply(c,c->argv[1]->ptr,sdslen(c->argv[1]->ptr))
-        == C_ERR) return;
+int showCommand(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
+    REDISMODULE_NOT_USED(argc);
+    size_t idlen;
+    const char *id = RedisModule_StringPtrLen(argv[1],&idlen);
+    if (validateJobIdOrReply(ctx,id,idlen) == C_ERR) return REDISMODULE_OK;
 
-    job *j = lookupJob(c->argv[1]->ptr);
-    if (!j) {
-        addReply(c,shared.nullbulk);
-        return;
-    }
-    addReplyJobInfo(c,j);
+    const char *jobid = RedisModule_StringPtrLen(argv[1],NULL);
+    job *j = lookupJob(jobid);
+    if (!j) return RedisModule_ReplyWithNull(ctx);
+    addReplyJobInfo(ctx,j);
+    return REDISMODULE_OK;
 }
 
 /* DELJOB jobid_1 jobid_2 ... jobid_N
@@ -1454,165 +1418,20 @@ void showCommand(client *c) {
  *
  * The return value is the number of jobs evicted.
  */
-void deljobCommand(client *c) {
+int deljobCommand(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
     int j, evicted = 0;
 
-    if (validateJobIDs(c,c->argv+1,c->argc-1) == C_ERR) return;
+    if (validateJobIDs(ctx,argv+1,argc-1) == C_ERR) return REDISMODULE_OK;
 
     /* Perform the appropriate action for each job. */
-    for (j = 1; j < c->argc; j++) {
-        job *job = lookupJob(c->argv[j]->ptr);
+    for (j = 1; j < argc; j++) {
+        const char *jobid = RedisModule_StringPtrLen(argv[j],NULL);
+        job *job = lookupJob(jobid);
         if (job == NULL) continue;
-        unregisterJob(job);
+        unregisterJob(ctx,job);
         freeJob(job);
         evicted++;
     }
-    addReplyLongLong(c,evicted);
-}
-
-/* JSCAN [<cursor>] [COUNT <count>] [BUSYLOOP] [QUEUE <queue>]
- * [STATE <state1> STATE <state2> ... STATE <stateN>]
- * [REPLY all|id]
- *
- * The command provides an interface to iterate all the existing jobs in
- * the local node, providing a cursor in the form of an integer that is passed
- * to the next command invocation. During the first call cursor must be 0,
- * in the next calls the cursor returned in the previous call is used in the
- * next. The iterator guarantees to return all the elements but may return
- * duplicated elements.
- *
- * Options:
- *
- * COUNT <count>     -- An hit about how much work to do per iteration.
- * BUSYLOOP          -- Block and return all the elements in a busy loop.
- * QUEUE <queue>     -- Return only jobs in the specified queue.
- * STATE <state>     -- Return jobs in the specified state.
- *                      Can be used multiple times for a logic OR.
- * REPLY <type>      -- Job reply type. Default is to report just the job
- *                      ID. If "all" is specified the full job state is
- *                      returned like for the SHOW command.
- *
- * The cursor argument can be in any place, the first non matching option
- * that has valid cursor form of an usigned number will be sensed as a valid
- * cursor.
- */
-
-/* JSCAN reply type. */
-#define JSCAN_REPLY_ID 0        /* Just report the Job ID. */
-#define JSCAN_REPLY_ALL 1       /* Reply full job info like SHOW. */
-
-/* The structure to pass the filter options to the callback. */
-struct jscanFilter {
-    int state[16];  /* Every state to return is set to non-zero. */
-    int numstates;  /* Number of states non-true. 0 = match all. */
-    robj *queue;    /* Queue name or NULL to return any queue. */
-};
-
-/* Callback for the dictionary scan used by JSCAN. */
-void jscanCallback(void *privdata, const dictEntry *de) {
-    void **pd = (void**)privdata;
-    list *list = pd[0];
-    struct jscanFilter *filter = pd[1];
-    job *job = dictGetKey(de);
-
-    /* Skip dummy jobs created by ACK command when job ID is unknown. */
-    if (dictSize(job->nodes_delivered) == 0) return;
-
-    /* Don't add the item if it does not satisfies our filter. */
-    if (filter->queue && !equalStringObjects(job->queue,filter->queue)) return;
-    if (filter->numstates && !filter->state[job->state]) return;
-
-    /* Otherwise put the queue into the list that will be returned to the
-     * client later. */
-    listAddNodeTail(list,job);
-}
-
-#define JSCAN_DEFAULT_COUNT 100
-void jscanCommand(client *c) {
-    struct jscanFilter filter;
-    int busyloop = 0; /* If true return all the jobs in a blocking way. */
-    long count = JSCAN_DEFAULT_COUNT;
-    long maxiterations;
-    unsigned long cursor = 0;
-    int cursor_set = 0, j;
-    int reply_type = JSCAN_REPLY_ID;
-
-    memset(&filter,0,sizeof(filter));
-
-    /* Parse arguments and cursor if any. */
-    for (j = 1; j < c->argc; j++) {
-        int remaining = c->argc - j -1;
-        char *opt = c->argv[j]->ptr;
-
-        if (!strcasecmp(opt,"count") && remaining) {
-            if (getLongFromObjectOrReply(c, c->argv[j+1], &count, NULL) !=
-                C_OK) return;
-            j++;
-        } else if (!strcasecmp(opt,"busyloop")) {
-            busyloop = 1;
-        } else if (!strcasecmp(opt,"queue") && remaining) {
-            filter.queue = c->argv[j+1];
-            j++;
-        } else if (!strcasecmp(opt,"state") && remaining) {
-            int jobstate = jobStateFromString(c->argv[j+1]->ptr);
-            if (jobstate == -1) {
-                addReplyError(c,"Invalid job state name");
-                return;
-            }
-            filter.state[jobstate] = 1;
-            filter.numstates++;
-            j++;
-        } else if (!strcasecmp(opt,"reply") && remaining) {
-            if (!strcasecmp(c->argv[j+1]->ptr,"id")) {
-                reply_type = JSCAN_REPLY_ID;
-            } else if (!strcasecmp(c->argv[j+1]->ptr,"all")) {
-                reply_type = JSCAN_REPLY_ALL;
-            } else {
-                addReplyError(c,"Invalid REPLY type, try ID or ALL");
-                return;
-            }
-            j++;
-        } else {
-            if (cursor_set != 0) {
-                addReply(c,shared.syntaxerr);
-                return;
-            }
-            if (parseScanCursorOrReply(c,c->argv[j],&cursor) == C_ERR)
-                return;
-            cursor_set = 1;
-        }
-    }
-
-    /* Scan the hash table to retrieve elements. */
-    maxiterations = count*10; /* Put a bound in the work we'll do. */
-
-    /* We pass two pointsr to the callback: the list where to append
-     * elements and the filter structure so that the callback will refuse
-     * to add non matching elements. */
-    void *privdata[2];
-    list *list = listCreate();
-    privdata[0] = list;
-    privdata[1] = &filter;
-    do {
-        cursor = dictScan(server.jobs,cursor,jscanCallback,privdata);
-    } while (cursor &&
-             (busyloop || /* If it's a busyloop, don't check iterations & len */
-              (maxiterations-- &&
-               listLength(list) < (unsigned long)count)));
-
-    /* Provide the reply to the client. */
-    addReplyMultiBulkLen(c, 2);
-    addReplyBulkLongLong(c,cursor);
-
-    addReplyMultiBulkLen(c, listLength(list));
-    listNode *node;
-    while ((node = listFirst(list)) != NULL) {
-        job *j = listNodeValue(node);
-        if (reply_type == JSCAN_REPLY_ID) addReplyJobID(c,j);
-        else if (reply_type == JSCAN_REPLY_ALL) addReplyJobInfo(c,j);
-        else serverPanic("Unknown JSCAN reply type");
-        listDelNode(list, node);
-    }
-    listRelease(list);
+    return RedisModule_ReplyWithLongLong(ctx,evicted);
 }
 

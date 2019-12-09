@@ -8,7 +8,9 @@
 #ifndef __DISQUE_JOB_H
 #define __DISQUE_JOB_H
 
-/* A Job ID is 42 bytes, check generateJobID() inside job.c for more info. */
+#include "rax.h"
+
+/* A Job ID is 40 bytes, check generateJobID() inside job.c for more info. */
 #define JOB_ID_LEN 40
 
 /* This represents a Job across the system.
@@ -73,6 +75,8 @@
  * the maximum retry period for sue (2^10 multipled for the MIN value). */
 #define JOB_GC_RETRY_COUNT_MAX 10
 
+#include "sds.h"
+
 /* Job representation in memory. */
 typedef struct job {
     char id[JOB_ID_LEN];    /* Job ID. */
@@ -97,10 +101,10 @@ typedef struct job {
      * native endianess, and only normalized during serialization.
      * -------------------------------------------------------------------- */
 
-    robj *queue;            /* Job queue name. */
+    sds queue;              /* Job queue name. */
     sds body;               /* Body, or NULL if job is just an ACK. */
-    dict *nodes_delivered;  /* Nodes we delievered the job for replication. */
-    dict *nodes_confirmed;  /* Nodes that confirmed to have a copy. If the job
+    rax *nodes_delivered;   /* Nodes we delievered the job for replication. */
+    rax *nodes_confirmed;   /* Nodes that confirmed to have a copy. If the job
                                state is ACKED, this is a list of nodes that
                                confirmed to have the job in acknowledged
                                state. */
@@ -117,6 +121,7 @@ typedef struct job {
                                job in this node. All the registered jobs are
                                ordered by awakeme time in the server.awakeme
                                skip list, unless awakeme is set to zero. */
+    RedisModuleBlockedClient *bc;
 } job;
 
 /* Number of bytes of directly serializable fields in the job structure. */
@@ -128,29 +133,32 @@ typedef struct job {
 
 struct clusterNode;
 
-job *createJob(char *id, int state, int ttl, int retry);
-int compareNodeIDsByJob(struct clusterNode *nodea, struct clusterNode *nodeb, job *j);
-void deleteJobFromCluster(job *j);
+job *createJob(const char *id, int state, int ttl, int retry);
+int compareNodeIDsByJob(const char *nodea, const char *nodeb, job *j);
+void deleteJobFromCluster(RedisModuleCtx *ctx, job *j);
 sds serializeJob(sds msg, job *j, int sertype);
-job *deserializeJob(unsigned char *p, size_t len, unsigned char **next, int sertype);
+job *deserializeJob(RedisModuleCtx *ctx, unsigned char *p, size_t len, unsigned char **next, int sertype);
 void fixForeingJobTimes(job *j);
 void updateJobNodes(job *j);
 int registerJob(job *j);
-int unregisterJob(job *j);
+int unregisterJob(RedisModuleCtx *ctx, job *j);
 void freeJob(job *j);
-int jobReplicationAchieved(job *j);
-job *lookupJob(char *id);
+int jobReplicationAchieved(RedisModuleCtx *ctx, job *j);
+job *lookupJob(const char *id);
 void updateJobAwakeTime(job *j, mstime_t at);
 void updateJobRequeueTime(job *j, mstime_t qtime);
-int getRawTTLFromJobID(char *id);
+int getRawTTLFromJobID(const char *id);
 void setJobTTLFromID(job *job);
-int validateJobIdOrReply(client *c, char *id, size_t len);
-void setJobAssociatedValue(job *j, void *val);
-void *jobGetAssociatedValue(job *j);
+int validateJobIdOrReply(RedisModuleCtx *ctx, const char *id, size_t len);
 char *jobStateToString(int state);
-int validateJobIDs(client *c, robj **ids, int count);
+int validateJobIDs(RedisModuleCtx *c, RedisModuleString **ids, int count);
+int skiplistCompareJobsToAwake(const void *a, const void *b);
 void AOFLoadJob(job *j);
 void AOFDelJob(job *j);
 void AOFAckJob(job *j);
+int addjobCommand(RedisModuleCtx *ctx, RedisModuleString **argv, int argc);
+int showCommand(RedisModuleCtx *ctx, RedisModuleString **argv, int argc);
+int deljobCommand(RedisModuleCtx *ctx, RedisModuleString **argv, int argc);
+void processJobs(RedisModuleCtx *ctx, void *clientData);
 
 #endif

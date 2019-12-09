@@ -9,8 +9,10 @@
 #define __DISQUE_ACK_H
 
 void acknowledgeJob(job *j);
-void tryJobGC(job *j);
-void gotAckReceived(clusterNode *sender, job *job, int known);
+void tryJobGC(RedisModuleCtx *ctx, job *job);
+void gotAckReceived(RedisModuleCtx *ctx, const char *sender, job *job, int known);
 mstime_t getNextGCRetryTime(job *job);
+int ackjobCommand(RedisModuleCtx *ctx, RedisModuleString **argv, int argc);
+int fastackCommand(RedisModuleCtx *ctx, RedisModuleString **argv, int argc);
 
 #endif

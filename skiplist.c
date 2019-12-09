@@ -40,13 +40,18 @@
  * This implementation originates from the Redis code base but was modified
  * in different ways. */
 
-#include "server.h"
-#include "zmalloc.h"
 #include "skiplist.h"
 
 #include <math.h>
 #include <stdlib.h>
 #include <sys/types.h>
+
+#define zmalloc RedisModule_Alloc
+#define zfree RedisModule_Free
+
+extern void *(*RedisModule_Alloc)(size_t bytes);
+extern void *(*RedisModule_Realloc)(void *ptr, size_t bytes);
+extern void (*RedisModule_Free)(void *ptr);
 
 #ifdef TEST_MAIN
 #define zmalloc malloc

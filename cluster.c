@@ -1,475 +1,458 @@
 /* Disque Cluster implementation.
  *
- * Copyright (c) 2018, Salvatore Sanfilippo <antirez at gmail dot com>
- * All rights reserved.
+ * Copyright (c) 2014-2019, Salvatore Sanfilippo <antirez at gmail dot com>
+ * All rights reserved. This code is under the AGPL license, check the
+ * LICENSE file for more info.
  *
  */
 
+#include "disque.h"
 #include "ack.h"
 
-/* When this function is called, there is a packet to process starting
- * at node->rcvbuf. Releasing the buffer is up to the caller, so this
- * function should just handle the higher level stuff of processing the
- * packet, modifying the cluster state if needed.
- *
- * The function returns 1 if the link is still valid after the packet
- * was processed, otherwise 0 if the link was freed since the packet
- * processing lead to some inconsistency error (for instance a PONG
- * received from the wrong sender ID). */
-int clusterProcessPacket(clusterLink *link) {
-    clusterMsg *hdr = (clusterMsg*) link->rcvbuf;
-    uint32_t totlen = ntohl(hdr->totlen);
-    uint16_t type = ntohs(hdr->type);
-    clusterNode *sender;
+/* Update the list of available nodes in the cluster. */
+void refreshReachableNodes(RedisModuleCtx *ctx) {
+    size_t numnodes;
+    char **ids = RedisModule_GetClusterNodesList(ctx,&numnodes);
+    if (ids == NULL) return;
 
-    server.cluster->stats_bus_messages_received++;
-    serverLog(LL_DEBUG,"--- Processing packet of type %d, %lu bytes",
-        type, (unsigned long) totlen);
+    /* Release the old list. */
+    for (int j = 0; j < ClusterReachableNodesCount; j++)
+        RedisModule_Free(ClusterReachableNodes[j]);
+    RedisModule_Free(ClusterReachableNodes);
 
-    /* Perform sanity checks */
-    if (totlen < 16) return 1; /* At least signature, version, totlen, count. */
-    if (ntohs(hdr->ver) != CLUSTER_PROTO_VER)
-        return 1; /* Can't handle versions other than the current one.*/
-    if (totlen > sdslen(link->rcvbuf)) return 1;
-    if (type == CLUSTERMSG_TYPE_PING || type == CLUSTERMSG_TYPE_PONG ||
-        type == CLUSTERMSG_TYPE_MEET)
-    {
-        uint16_t count = ntohs(hdr->count);
-        uint32_t explen; /* expected length of this packet */
-
-        explen = sizeof(clusterMsg)-sizeof(union clusterMsgData);
-        explen += (sizeof(clusterMsgDataGossip)*count);
-        if (totlen != explen) return 1;
-    } else if (type == CLUSTERMSG_TYPE_FAIL) {
-        uint32_t explen = sizeof(clusterMsg)-sizeof(union clusterMsgData);
-
-        explen += sizeof(clusterMsgDataFail);
-        if (totlen != explen) return 1;
-    } else if (type == CLUSTERMSG_TYPE_REPLJOB ||
-               type == CLUSTERMSG_TYPE_YOURJOBS) {
-        uint32_t explen = sizeof(clusterMsg)-sizeof(union clusterMsgData);
-
-        explen += sizeof(clusterMsgDataJob) -
-                  sizeof(hdr->data.jobs.serialized.jobs_data) +
-                  ntohl(hdr->data.jobs.serialized.datasize);
-        if (totlen != explen) return 1;
-    } else if (type == CLUSTERMSG_TYPE_GOTJOB ||
-               type == CLUSTERMSG_TYPE_ENQUEUE ||
-               type == CLUSTERMSG_TYPE_QUEUED ||
-               type == CLUSTERMSG_TYPE_WORKING ||
-               type == CLUSTERMSG_TYPE_SETACK ||
-               type == CLUSTERMSG_TYPE_GOTACK ||
-               type == CLUSTERMSG_TYPE_DELJOB ||
-               type == CLUSTERMSG_TYPE_WILLQUEUE)
-    {
-        uint32_t explen = sizeof(clusterMsg)-sizeof(union clusterMsgData);
-
-        explen += sizeof(clusterMsgDataJobID);
-        if (totlen != explen) return 1;
-    } else if (type == CLUSTERMSG_TYPE_NEEDJOBS ||
-               type == CLUSTERMSG_TYPE_PAUSE)
-    {
-        uint32_t explen = sizeof(clusterMsg)-sizeof(union clusterMsgData);
-        explen += sizeof(clusterMsgDataQueueOp) - 8;
-        if (totlen < explen) return 1;
-        explen += ntohl(hdr->data.queueop.about.qnamelen);
-        if (totlen != explen) return 1;
+    /* Allocate and populate the new one. */
+    ClusterReachableNodes = RedisModule_Alloc(sizeof(char*)*numnodes);
+    ClusterReachableNodesCount = 0;
+    for (size_t j = 0; j < numnodes; j++) {
+        int flags;
+        RedisModule_GetClusterNodeInfo(ctx,ids[j],NULL,NULL,NULL,&flags);
+        /* XXX: Check for the LEAVING condition as well and don't include
+         * the node. */
+        if (flags & REDISMODULE_NODE_MYSELF ||
+            flags & REDISMODULE_NODE_PFAIL ||
+            flags & REDISMODULE_NODE_FAIL) continue;
+        char *nodeid = RedisModule_Alloc(REDISMODULE_NODE_ID_LEN);
+        memcpy(nodeid,ids[j],REDISMODULE_NODE_ID_LEN);
+        ClusterReachableNodes[ClusterReachableNodesCount] = nodeid;
+        ClusterReachableNodesCount++;
     }
+    RedisModule_FreeClusterNodesList(ids);
+}
 
-    /* Check if the sender is a known node. */
-    sender = clusterLookupNode(hdr->sender);
-
-    /* Initial processing of PING and MEET requests replying with a PONG. */
-    if (type == CLUSTERMSG_TYPE_PING || type == CLUSTERMSG_TYPE_MEET) {
-        serverLog(LL_DEBUG,"Ping packet received: %p", (void*)link->node);
-
-        /* We use incoming MEET messages in order to set the address
-         * for 'myself', since only other cluster nodes will send us
-         * MEET messages on handshakes, when the cluster joins, or
-         * later if we changed address, and those nodes will use our
-         * official address to connect to us. So by obtaining this address
-         * from the socket is a simple way to discover / update our own
-         * address in the cluster without it being hardcoded in the config.
-         *
-         * However if we don't have an address at all, we update the address
-         * even with a normal PING packet. If it's wrong it will be fixed
-         * by MEET later. */
-        if (type == CLUSTERMSG_TYPE_MEET || myself->ip[0] == '\0') {
-            char ip[NET_IP_STR_LEN];
-
-            if (anetSockName(link->fd,ip,sizeof(ip),NULL) != -1 &&
-                strcmp(ip,myself->ip))
-            {
-                memcpy(myself->ip,ip,NET_IP_STR_LEN);
-                serverLog(LL_WARNING,"IP address for this node updated to %s",
-                    myself->ip);
-                clusterDoBeforeSleep(CLUSTER_TODO_SAVE_CONFIG);
-            }
-        }
-
-        /* Add this node if it is new for us and the msg type is MEET.
-         * In this stage we don't try to add the node with the right
-         * flags, slaveof pointer, and so forth, as this details will be
-         * resolved when we'll receive PONGs from the node. */
-        if (!sender && type == CLUSTERMSG_TYPE_MEET) {
-            clusterNode *node;
-
-            node = createClusterNode(NULL,CLUSTER_NODE_HANDSHAKE);
-            nodeIp2String(node->ip,link);
-            node->port = ntohs(hdr->port);
-            clusterAddNode(node);
-            clusterDoBeforeSleep(CLUSTER_TODO_SAVE_CONFIG);
-        }
-
-        /* If this is a MEET packet from an unknown node, we still process
-         * the gossip section here since we have to trust the sender because
-         * of the message type. */
-        if (!sender && type == CLUSTERMSG_TYPE_MEET)
-            clusterProcessGossipSection(hdr,link);
-
-        /* Anyway reply with a PONG */
-        clusterSendPing(link,CLUSTERMSG_TYPE_PONG);
+/* Shuffle the array of reachable nodes using the Fisher Yates method so the
+ * caller can just pick the first N to send messages to N random nodes.
+ * */
+void clusterShuffleReachableNodes(void) {
+    int r, i;
+    char *tmp;
+    for(i = ClusterReachableNodesCount - 1; i > 0; i--) {
+        r = rand() % (i + 1);
+        tmp = ClusterReachableNodes[r];
+        ClusterReachableNodes[r] = ClusterReachableNodes[i];
+        ClusterReachableNodes[i] = tmp;
     }
+}
 
-    /* PING, PONG, MEET: process config information. */
-    if (type == CLUSTERMSG_TYPE_PING || type == CLUSTERMSG_TYPE_PONG ||
-        type == CLUSTERMSG_TYPE_MEET)
+/* Our message types callbacks: they are called when the instance receives
+ * a message of the specified type via the Redis Cluster bus. */
+
+/* This function performs common message sanity checks based on the message
+ * type. If the message looks ok, 1 is returned, otherwise 0 is returned. */
+int validateMessage(RedisModuleCtx *ctx, const char *sender_id, const unsigned char *payload, uint32_t len, uint8_t type) {
+    /* Only handle jobs by known nodes. */
+    int known_sender = RedisModule_GetClusterNodeInfo(ctx,sender_id,NULL,NULL,
+                       NULL,NULL) == REDISMODULE_OK;
+    if (!known_sender) return 0;
+
+    if (type == DISQUE_MSG_REPLJOB ||
+        type == DISQUE_MSG_YOURJOBS)
     {
-        serverLog(LL_DEBUG,"%s packet received: %p",
-            type == CLUSTERMSG_TYPE_PING ? "ping" : "pong",
-            (void*)link->node);
-        if (link->node) {
-            if (nodeInHandshake(link->node)) {
-                /* If we already have this node, try to change the
-                 * IP/port of the node with the new one. */
-                if (sender) {
-                    serverLog(LL_VERBOSE,
-                        "Handshake: we already know node %.40s, "
-                        "updating the address if needed.", sender->name);
-                    if (nodeUpdateAddressIfNeeded(sender,link,ntohs(hdr->port)))
-                    {
-                        clusterDoBeforeSleep(CLUSTER_TODO_SAVE_CONFIG|
-                                             CLUSTER_TODO_UPDATE_STATE);
-                    }
-                    /* Free this node as we already have it. This will
-                     * cause the link to be freed as well. */
-                    clusterDelNode(link->node);
-                    return 0;
-                }
+        clusterSerializedJobMessage *hdr =
+            (clusterSerializedJobMessage*) payload;
 
-                /* First thing to do is replacing the random name with the
-                 * right node name if this was a handshake stage. */
-                clusterRenameNode(link->node, hdr->sender);
-                serverLog(LL_DEBUG,"Handshake with node %.40s completed.",
-                    link->node->name);
-                link->node->flags &= ~CLUSTER_NODE_HANDSHAKE;
-                clusterDoBeforeSleep(CLUSTER_TODO_UPDATE_STATE|
-                                     CLUSTER_TODO_SAVE_CONFIG);
-            } else if (memcmp(link->node->name,hdr->sender,
-                        CLUSTER_NAMELEN) != 0)
-            {
-                /* If the reply has a non matching node ID we
-                 * disconnect this node and set it as not having an associated
-                 * address. */
-                serverLog(LL_DEBUG,"PONG contains mismatching sender ID");
-                link->node->flags |= CLUSTER_NODE_NOADDR;
-                link->node->ip[0] = '\0';
-                link->node->port = 0;
-                freeClusterLink(link);
-                clusterDoBeforeSleep(CLUSTER_TODO_SAVE_CONFIG);
-                return 0;
-            }
+        /* Length should be at least as big as our message header. */
+        if (len < sizeof(clusterSerializedJobMessage)-sizeof(hdr->jobs_data)) {
+            RedisModule_Log(ctx,"warning","Wrong length in message type %d.",
+                type);
+            return 0;
         }
 
-        /* Update the node address if it changed. */
-        if (sender && type == CLUSTERMSG_TYPE_PING &&
-            !nodeInHandshake(sender) &&
-            nodeUpdateAddressIfNeeded(sender,link,ntohs(hdr->port)))
+        uint32_t numjobs = ntohl(hdr->numjobs);
+        uint32_t datasize = ntohl(hdr->datasize);
+
+        /* Check that size matches the serialized jobs len. */
+        if (datasize+sizeof(clusterSerializedJobMessage)-sizeof(hdr->jobs_data)
+            != len)
         {
-            clusterDoBeforeSleep(CLUSTER_TODO_SAVE_CONFIG|
-                                 CLUSTER_TODO_UPDATE_STATE);
+            RedisModule_Log(ctx,"warning","Wrong length in message type %d.",
+                type);
+            return 0;
         }
 
-        /* Update our info about the node */
-        if (link->node && type == CLUSTERMSG_TYPE_PONG) {
-            link->node->pong_received = mstime();
-            link->node->ping_sent = 0;
-
-            /* The PFAIL condition can be reversed without external
-             * help if it is momentary (that is, if it does not
-             * turn into a FAIL state).
-             *
-             * The FAIL condition is also reversible under specific
-             * conditions detected by clearNodeFailureIfNeeded(). */
-            if (nodeTimedOut(link->node)) {
-                link->node->flags &= ~CLUSTER_NODE_PFAIL;
-                clusterDoBeforeSleep(CLUSTER_TODO_SAVE_CONFIG|
-                                     CLUSTER_TODO_UPDATE_STATE);
-            } else if (nodeFailed(link->node)) {
-                clearNodeFailureIfNeeded(link->node);
-            }
-        }
-
-        /* Copy certain flags from what the node publishes. */
-        if (sender) {
-            int old_flags = sender->flags;
-            int reported_flags = ntohs(hdr->flags);
-            int flags_to_copy = CLUSTER_NODE_LEAVING;
-            sender->flags &= ~flags_to_copy;
-            sender->flags |= (reported_flags & flags_to_copy);
-
-            /* Currently we just save the config without FSYNC nor
-             * update of the cluster state, since the only flag we update
-             * here is LEAVING which is non critical to persist. */
-            if (sender->flags != old_flags)
-                clusterDoBeforeSleep(CLUSTER_TODO_SAVE_CONFIG);
-        }
-
-        /* Get info from the gossip section */
-        if (sender) clusterProcessGossipSection(hdr,link);
-    } else if (type == CLUSTERMSG_TYPE_FAIL) {
-        clusterNode *failing;
-
-        if (!sender) return 1;
-        failing = clusterLookupNode(hdr->data.fail.about.nodename);
-        if (failing &&
-            !(failing->flags & (CLUSTER_NODE_FAIL|CLUSTER_NODE_MYSELF)))
-        {
-            serverLog(LL_VERBOSE,
-                "FAIL message received from %.40s about %.40s",
-                hdr->sender, hdr->data.fail.about.nodename);
-            failing->flags |= CLUSTER_NODE_FAIL;
-            failing->fail_time = mstime();
-            failing->flags &= ~CLUSTER_NODE_PFAIL;
-            clusterDoBeforeSleep(CLUSTER_TODO_SAVE_CONFIG|
-                                 CLUSTER_TODO_UPDATE_STATE);
-        }
-    } else if (type == CLUSTERMSG_TYPE_REPLJOB) {
-        uint32_t numjobs = ntohl(hdr->data.jobs.serialized.numjobs);
-        uint32_t datasize = ntohl(hdr->data.jobs.serialized.datasize);
-        job *j;
-
-        /* Only replicate jobs by known nodes. */
-        if (!sender || numjobs != 1) return 1;
-
-        /* Don't replicate jobs if we got already memory issues or if we
-         * are leaving the cluster. */
-        if (getMemoryWarningLevel() > 0 || myselfLeaving()) return 1;
-
-        j = deserializeJob(hdr->data.jobs.serialized.jobs_data,datasize,NULL,SER_MESSAGE);
-        if (j == NULL) {
-            serverLog(LL_WARNING,
-                "Received corrupted job description from node %.40s",
-                hdr->sender);
-        } else {
-            /* Don't replicate jobs about queues paused in input. */
-            queue *q = lookupQueue(j->queue);
-            if (q && q->flags & QUEUE_FLAG_PAUSED_IN) {
-                freeJob(j);
-                return 1;
-            }
-            j->flags |= JOB_FLAG_BCAST_QUEUED;
-            j->state = JOB_STATE_ACTIVE;
-            int retval = registerJob(j);
-            if (retval == C_ERR) {
-                /* The job already exists. Just update the list of nodes
-                 * that may have a copy. */
-                updateJobNodes(j);
-            } else {
-                AOFLoadJob(j);
-            }
-            /* Reply with a GOTJOB message, even if we already did in the past.
-             * The node receiving ADDJOB may try multiple times, and our
-             * GOTJOB messages may get lost. */
-            if (!(hdr->mflags[0] & CLUSTERMSG_FLAG0_NOREPLY))
-                clusterSendGotJob(sender,j);
-            /* Release the job if we already had it. */
-            if (retval == C_ERR) freeJob(j);
-        }
-    } else if (type == CLUSTERMSG_TYPE_YOURJOBS) {
-        uint32_t numjobs = ntohl(hdr->data.jobs.serialized.numjobs);
-        uint32_t datasize = ntohl(hdr->data.jobs.serialized.datasize);
-
-        if (!sender || numjobs == 0) return 1;
-        receiveYourJobs(sender,numjobs,hdr->data.jobs.serialized.jobs_data,datasize);
-    } else if (type == CLUSTERMSG_TYPE_GOTJOB) {
-        if (!sender) return 1;
-
-        job *j = lookupJob(hdr->data.jobid.job.id);
-        if (j && j->state == JOB_STATE_WAIT_REPL) {
-            dictAdd(j->nodes_confirmed,sender->name,sender);
-            if (dictSize(j->nodes_confirmed) == j->repl)
-                jobReplicationAchieved(j);
-        }
-    } else if (type == CLUSTERMSG_TYPE_SETACK) {
-        if (!sender) return 1;
-        uint32_t mayhave = ntohl(hdr->data.jobid.job.aux);
-
-        serverLog(LL_VERBOSE,"RECEIVED SETACK(%d) FROM %.40s FOR JOB %.*s",
-            (int) mayhave,
-            sender->name, JOB_ID_LEN, hdr->data.jobid.job.id);
-
-        job *j = lookupJob(hdr->data.jobid.job.id);
-
-        /* If we have the job, change the state to acknowledged. */
-        if (j) {
-            if (j->state == JOB_STATE_WAIT_REPL) {
-                /* The job was acknowledged before ADDJOB achieved the
-                 * replication level requested! Unblock the client and
-                 * change the job state to active. */
-                if (jobReplicationAchieved(j) == C_ERR) {
-                    /* The job was externally replicated and deleted from
-                     * this node. Nothing to do... */
-                    return 1;
-                }
-            }
-            /* ACK it if not already acked. */
-            acknowledgeJob(j);
-        }
-
-        /* Reply according to the job exact state. */
-        if (j == NULL || dictSize(j->nodes_delivered) <= mayhave) {
-            /* If we don't know the job or our set of nodes that may have
-             * the job is not larger than the sender, reply with GOTACK. */
-            int known = j ? 1 : 0;
-            clusterSendGotAck(sender,hdr->data.jobid.job.id,known);
-        } else {
-            /* We have the job but we know more nodes that may have it
-             * than the sender, if we are here. Don't reply with GOTACK unless
-             * mayhave is 0 (the sender just received an ACK from client about
-             * a job it does not know), in order to let the sender delete it. */
-            if (mayhave == 0)
-                clusterSendGotAck(sender,hdr->data.jobid.job.id,1);
-            /* Anyway, start a GC about this job. Because one of the two is
-             * true:
-             * 1) mayhave in the sender is 0, so it's up to us to start a GC
-             *    because the sender has just a dummy ACK.
-             * 2) Or, we prevented the sender from finishing the GC since
-             *    we are not replying with GOTACK, and we need to take
-             *    responsability to evict the job in the cluster. */
-            tryJobGC(j);
-        }
-    } else if (type == CLUSTERMSG_TYPE_GOTACK) {
-        if (!sender) return 1;
-        uint32_t known = ntohl(hdr->data.jobid.job.aux);
-
-        job *j = lookupJob(hdr->data.jobid.job.id);
-        if (j) gotAckReceived(sender,j,known);
-    } else if (type == CLUSTERMSG_TYPE_DELJOB) {
-        if (!sender) return 1;
-        job *j = lookupJob(hdr->data.jobid.job.id);
-        if (j) {
-            serverLog(LL_VERBOSE,"RECEIVED DELJOB FOR JOB %.*s",JOB_ID_LEN,j->id);
-            unregisterJob(j);
-            freeJob(j);
-        }
-    } else if (type == CLUSTERMSG_TYPE_ENQUEUE) {
-        if (!sender) return 1;
-        uint32_t delay = ntohl(hdr->data.jobid.job.aux);
-
-        job *j = lookupJob(hdr->data.jobid.job.id);
-        if (j && j->state < JOB_STATE_QUEUED) {
-            /* Discard this message if the queue is paused in input. */
-            queue *q = lookupQueue(j->queue);
-            if (q == NULL || !(q->flags & QUEUE_FLAG_PAUSED_IN)) {
-                /* We received an ENQUEUE message: consider this node as the
-                 * first to queue the job, so no need to broadcast a QUEUED
-                 * message the first time we queue it. */
-                j->flags &= ~JOB_FLAG_BCAST_QUEUED;
-                serverLog(LL_VERBOSE,"RECEIVED ENQUEUE FOR JOB %.*s",
-                          JOB_ID_LEN,j->id);
-                if (delay == 0) {
-                    enqueueJob(j,0);
-                } else {
-                    updateJobRequeueTime(j,server.mstime+delay*1000);
-                }
-            }
-        }
-    } else if (type == CLUSTERMSG_TYPE_QUEUED ||
-               type == CLUSTERMSG_TYPE_WORKING) {
-        if (!sender) return 1;
-
-        job *j = lookupJob(hdr->data.jobid.job.id);
-        if (j && j->state <= JOB_STATE_QUEUED) {
-            serverLog(LL_VERBOSE,"UPDATING QTIME FOR JOB %.*s",JOB_ID_LEN,j->id);
-            /* Move the time we'll re-queue this job in the future. Moreover
-             * if the sender has a Node ID greater than our node ID, and we
-             * have the message queued as well, dequeue it, to avoid an
-             * useless multiple delivery.
-             *
-             * The message is always dequeued in case the message is of
-             * type WORKING, since this is the explicit semantics of WORKING.
-             *
-             * If the message is WORKING always dequeue regardless of the
-             * sender name, since there is a client claiming to work on the
-             * message. */
-            if (j->state == JOB_STATE_QUEUED &&
-                (type == CLUSTERMSG_TYPE_WORKING ||
-                 compareNodeIDsByJob(sender,myself,j) > 0))
-            {
-                dequeueJob(j);
-            }
-
-            /* Update the time at which this node will attempt to enqueue
-             * the message again. */
-            if (j->retry) {
-                j->flags |= JOB_FLAG_BCAST_WILLQUEUE;
-                updateJobRequeueTime(j,server.mstime+
-                                       j->retry*1000+
-                                       randomTimeError(DISQUE_TIME_ERR));
-            }
-
-            /* Update multiple deliveries counters. */
-            if (type == CLUSTERMSG_TYPE_QUEUED) {
-                if (hdr->mflags[0] & CLUSTERMSG_FLAG0_INCR_NACKS)
-                    j->num_nacks++;
-                if (hdr->mflags[0] & CLUSTERMSG_FLAG0_INCR_DELIV)
-                    j->num_deliv++;
-            }
-        } else if (j && j->state == JOB_STATE_ACKED) {
-            /* Some other node queued a message that we have as
-             * already acknowledged. Try to force it to drop it. */
-            clusterSendSetAck(sender,j);
-        }
-    } else if (type == CLUSTERMSG_TYPE_WILLQUEUE) {
-        if (!sender) return 1;
-
-        job *j = lookupJob(hdr->data.jobid.job.id);
-        if (j) {
-            if (j->state == JOB_STATE_ACTIVE ||
-                j->state == JOB_STATE_QUEUED)
-            {
-                dictAdd(j->nodes_delivered,sender->name,sender);
-            }
-            if (j->state == JOB_STATE_QUEUED)
-                clusterBroadcastQueued(j,CLUSTERMSG_NOFLAGS);
-            else if (j->state == JOB_STATE_ACKED) clusterSendSetAck(sender,j);
-        }
-    } else if (type == CLUSTERMSG_TYPE_NEEDJOBS ||
-               type == CLUSTERMSG_TYPE_PAUSE)
+        /* Check that the number of jobs also match according to the message
+         * type. */
+        if (type == DISQUE_MSG_REPLJOB && numjobs != 1) return 0;
+        if (type == DISQUE_MSG_YOURJOBS && numjobs == 0) return 0;
+    } else if (type == DISQUE_MSG_GOTJOB ||
+               type == DISQUE_MSG_SETACK ||
+               type == DISQUE_MSG_GOTACK ||
+               type == DISQUE_MSG_ENQUEUE ||
+               type == DISQUE_MSG_WORKING ||
+               type == DISQUE_MSG_QUEUED ||
+               type == DISQUE_MSG_WILLQUEUE ||
+               type == DISQUE_MSG_DELJOB)
     {
-        if (!sender) return 1;
-        uint32_t qnamelen = ntohl(hdr->data.queueop.about.qnamelen);
-        uint32_t count = ntohl(hdr->data.queueop.about.aux);
-        robj *qname = createStringObject(hdr->data.queueop.about.qname,
-                                         qnamelen);
-        serverLog(LL_VERBOSE,"RECEIVED %s FOR QUEUE %s (%d)",
-            (type == CLUSTERMSG_TYPE_NEEDJOBS) ? "NEEDJOBS" : "PAUSE",
-            (char*)qname->ptr,count);
-        if (type == CLUSTERMSG_TYPE_NEEDJOBS)
-            receiveNeedJobs(sender,qname,count);
-        else
-            receivePauseQueue(qname,count);
-        decrRefCount(qname);
+        /* Length should be at least as big as our message header. */
+        if (len < sizeof (clusterJobIDMessage)) return 0;
+    } else if (type == DISQUE_MSG_NEEDJOBS ||
+               type == DISQUE_MSG_PAUSE)
+    {
+        clusterQueueMessage *hdr = (clusterQueueMessage*) payload;
+        if (len < sizeof(clusterQueueMessage)-sizeof(hdr->qname)) {
+            RedisModule_Log(ctx,"warning","Wrong length in message type %d.",
+                type);
+            return 0;
+        }
+
+        uint32_t qnamelen = ntohl(hdr->qnamelen);
+        if (qnamelen+sizeof(clusterQueueMessage)-sizeof(hdr->qname) != len) {
+            RedisModule_Log(ctx,"warning","Wrong length in message type %d.",
+                type);
+            return 0;
+        }
     } else {
-        serverLog(LL_WARNING,"Received unknown packet type: %d", type);
+        RedisModule_Log(ctx,"warning","validateMessage() unknown message type");
     }
-    return 1;
+
+    return 1; /* Message looks fine. */
+}
+
+/* REPLJOB message: some node is asking us to create a copy (replicate) the
+ * message it is sending to us. We reply with GOTJOB if we replicated the
+ * message successfully, or if we already have it. */
+void REPLJOBcallback(RedisModuleCtx *ctx, const char *sender_id, uint8_t msgtype, const unsigned char *payload, uint32_t len) {
+    if (validateMessage(ctx,sender_id,payload,len,msgtype) == 0)
+        return;
+
+    clusterSerializedJobMessage *hdr = (clusterSerializedJobMessage*) payload;
+    uint32_t datasize = ntohl(hdr->datasize);
+    job *j;
+
+    /* Don't replicate jobs if we got already memory issues or if we
+     * are leaving the cluster. */
+    if (getMemoryWarningLevel(ctx) > 0 || myselfLeaving()) return;
+
+    j = deserializeJob(ctx,hdr->jobs_data,datasize,NULL,SER_MESSAGE);
+    if (j == NULL) {
+        RedisModule_Log(ctx,"warning",
+            "Received corrupted job description from node %.40s",
+            sender_id);
+    } else {
+        /* Don't replicate jobs about queues paused in input. */
+        queue *q = lookupQueue(j->queue,sdslen(j->queue));
+        if (q && q->flags & QUEUE_FLAG_PAUSED_IN) {
+            freeJob(j);
+            return;
+        }
+        j->flags |= JOB_FLAG_BCAST_QUEUED;
+        j->state = JOB_STATE_ACTIVE;
+        int retval = registerJob(j);
+        if (retval == C_ERR) {
+            /* The job already exists. Just update the list of nodes
+             * that may have a copy. */
+            updateJobNodes(j);
+        } else {
+            AOFLoadJob(j);
+        }
+        /* Reply with a GOTJOB message, even if we already did in the past.
+         * The node receiving ADDJOB may try multiple times, and our
+         * GOTJOB messages may get lost. */
+        if (!(hdr->flags[0] & DISQUE_MSG_FLAG0_NOREPLY))
+            clusterSendGotJob(ctx,sender_id,j);
+        /* Release the job if we already had it. */
+        if (retval == C_ERR) freeJob(j);
+    }
+}
+
+/* YOURJOBS message handler. We do basic sanity checks here and then pass
+ * the control to queue.c. */
+void YOURJOBScallback(RedisModuleCtx *ctx, const char *sender_id, uint8_t msgtype, const unsigned char *payload, uint32_t len) {
+    if (validateMessage(ctx,sender_id,payload,len,msgtype) == 0)
+        return;
+
+    clusterSerializedJobMessage *hdr = (clusterSerializedJobMessage*) payload;
+    uint32_t numjobs = ntohl(hdr->numjobs);
+    uint32_t datasize = ntohl(hdr->datasize);
+
+    /* Pass control to queue.c higher level function that will decode and
+     * queue the jobs. */
+    receiveYourJobs(ctx,sender_id,numjobs,hdr->jobs_data,datasize);
+}
+
+/* GOTJOB message. This is an acknowledge that our job was replicated
+ * correctly by the sender. */
+void GOTJOBcallback(RedisModuleCtx *ctx, const char *sender_id, uint8_t msgtype, const unsigned char *payload, uint32_t len) {
+    if (validateMessage(ctx,sender_id,payload,len,msgtype) == 0)
+        return;
+
+    clusterJobIDMessage *hdr = (clusterJobIDMessage*) payload;
+
+    job *j = lookupJob(hdr->id);
+    if (j && j->state == JOB_STATE_WAIT_REPL) {
+        raxInsert(j->nodes_confirmed,
+                  (unsigned char*)sender_id,REDISMODULE_NODE_ID_LEN,
+                  NULL,NULL);
+        if (raxSize(j->nodes_confirmed) == j->repl)
+            jobReplicationAchieved(ctx,j);
+    }
+}
+
+/* SETACK message: set the job as acknowledged and bring forward the
+ * garbage collection of the job if needed, either replying with a GOTACK
+ * message or by continuing the GC oruselves if we are in a better condition
+ * than the sender. */
+void SETACKcallback(RedisModuleCtx *ctx, const char *sender_id, uint8_t msgtype, const unsigned char *payload, uint32_t len) {
+    if (validateMessage(ctx,sender_id,payload,len,msgtype) == 0)
+        return;
+
+    clusterJobIDMessage *hdr = (clusterJobIDMessage*) payload;
+
+    uint32_t mayhave = ntohl(hdr->aux);
+
+    RedisModule_Log(ctx,"verbose","RECEIVED SETACK(%d) FROM %.40s FOR JOB %.*s",
+        (int) mayhave, sender_id, JOB_ID_LEN, hdr->id);
+
+    job *j = lookupJob(hdr->id);
+
+    /* If we have the job, change the state to acknowledged. */
+    if (j) {
+        if (j->state == JOB_STATE_WAIT_REPL) {
+            /* The job was acknowledged before ADDJOB achieved the
+             * replication level requested! Unblock the client and
+             * change the job state to active. */
+            if (jobReplicationAchieved(ctx,j) == C_ERR) {
+                /* The job was externally replicated and deleted from
+                 * this node. Nothing to do... */
+                return;
+            }
+        }
+        /* ACK it if not already acked. */
+        acknowledgeJob(j);
+    }
+
+    /* Reply according to the job exact state. */
+    if (j == NULL || raxSize(j->nodes_delivered) <= mayhave) {
+        /* If we don't know the job or our set of nodes that may have
+         * the job is not larger than the sender, reply with GOTACK. */
+        int known = j ? 1 : 0;
+        clusterSendGotAck(ctx,sender_id,hdr->id,known);
+    } else {
+        /* We have the job but we know more nodes that may have it
+         * than the sender, if we are here. Don't reply with GOTACK unless
+         * mayhave is 0 (the sender just received an ACK from client about
+         * a job it does not know), in order to let the sender delete it. */
+        if (mayhave == 0)
+            clusterSendGotAck(ctx,sender_id,hdr->id,1);
+        /* Anyway, start a GC about this job. Because one of the two is
+         * true:
+         * 1) mayhave in the sender is 0, so it's up to us to start a GC
+         *    because the sender has just a dummy ACK.
+         * 2) Or, we prevented the sender from finishing the GC since
+         *    we are not replying with GOTACK, and we need to take
+         *    responsability to evict the job in the cluster. */
+        tryJobGC(ctx,j);
+    }
+}
+
+/* GOTACK message. Acknowledge that we received the SETACK message. */
+void GOTACKcallback(RedisModuleCtx *ctx, const char *sender_id, uint8_t msgtype, const unsigned char *payload, uint32_t len) {
+    if (validateMessage(ctx,sender_id,payload,len,msgtype) == 0)
+        return;
+
+    clusterJobIDMessage *hdr = (clusterJobIDMessage*) payload;
+
+    uint32_t known = ntohl(hdr->aux);
+    job *j = lookupJob(hdr->id);
+    if (j) gotAckReceived(ctx,sender_id,j,known);
+}
+
+/* ENQUEUE message. Force the receiver to put a given job into the queue for
+ * delivery. This is sent by nodes that created a job for a client, but are
+ * under memory pressure and don't want to take a copy: they increase the
+ * replication factor by 1, and later discard the job, after sending an
+ * EQUEUE message to a random node having a copy of the job. */
+void ENQUEUEcallback(RedisModuleCtx *ctx, const char *sender_id, uint8_t msgtype, const unsigned char *payload, uint32_t len) {
+    if (validateMessage(ctx,sender_id,payload,len,msgtype) == 0)
+        return;
+
+    clusterJobIDMessage *hdr = (clusterJobIDMessage*) payload;
+    uint32_t delay = ntohl(hdr->aux);
+
+    job *j = lookupJob(hdr->id);
+    if (j && j->state < JOB_STATE_QUEUED) {
+        /* Discard this message if the queue is paused in input. */
+        queue *q = lookupQueue(j->queue,sdslen(j->queue));
+        if (q == NULL || !(q->flags & QUEUE_FLAG_PAUSED_IN)) {
+            /* We received an ENQUEUE message: consider this node as the
+             * first to queue the job, so no need to broadcast a QUEUED
+             * message the first time we queue it. */
+            j->flags &= ~JOB_FLAG_BCAST_QUEUED;
+            RedisModule_Log(ctx,"verbose","RECEIVED ENQUEUE FOR JOB %.*s",
+                            JOB_ID_LEN,j->id);
+            if (delay == 0) {
+                enqueueJob(ctx,j,0);
+            } else {
+                updateJobRequeueTime(j,mstime()+delay*1000);
+            }
+        }
+    }
+}
+
+/* Implements WORKINGcallback() and QUEUEDcallback().
+ *
+ * Those messages are sent by nodes that just queued a message or that
+ * received a WORKING command from a client, in order to update the
+ * re-queue time in the other nodes and avoid useless additional deliveries
+ * of the same message. */
+void receiveWorkingAndQueued(RedisModuleCtx *ctx, const char *sender_id, const unsigned char *payload, uint32_t len, int msgtype) {
+    if (validateMessage(ctx,sender_id,payload,len,msgtype) == 0)
+        return;
+
+    clusterJobIDMessage *hdr = (clusterJobIDMessage*) payload;
+    job *j = lookupJob(hdr->id);
+    if (j && j->state <= JOB_STATE_QUEUED) {
+        RedisModule_Log(ctx,"verbose",
+            "UPDATING QTIME FOR JOB %.*s",JOB_ID_LEN,j->id);
+        /* Move the time we'll re-queue this job in the future. Moreover
+         * if the sender has a Node ID greater than our node ID, and we
+         * have the message queued as well, dequeue it, to avoid an
+         * useless multiple delivery.
+         *
+         * The message is always dequeued in case the message is of
+         * type WORKING, since this is the explicit semantics of WORKING.
+         *
+         * If the message is WORKING always dequeue regardless of the
+         * sender name, since there is a client claiming to work on the
+         * message. */
+        const char *myself = RedisModule_GetMyClusterID();
+        if (j->state == JOB_STATE_QUEUED &&
+            (msgtype == DISQUE_MSG_WORKING ||
+             compareNodeIDsByJob(sender_id,myself,j) > 0))
+        {
+            dequeueJob(j);
+        }
+
+        /* Update the time at which this node will attempt to enqueue
+         * the message again. */
+        if (j->retry) {
+            j->flags |= JOB_FLAG_BCAST_WILLQUEUE;
+            updateJobRequeueTime(j,mstime()+
+                                   j->retry*1000+
+                                   randomTimeError(DISQUE_TIME_ERR));
+        }
+
+        /* Update multiple deliveries counters. */
+        if (msgtype == DISQUE_MSG_QUEUED) {
+            if (hdr->flags[0] & DISQUE_MSG_FLAG0_INCR_NACKS)
+                j->num_nacks++;
+            if (hdr->flags[0] & DISQUE_MSG_FLAG0_INCR_DELIV)
+                j->num_deliv++;
+        }
+    } else if (j && j->state == JOB_STATE_ACKED) {
+        /* Some other node queued a message that we have as
+         * already acknowledged. Try to force it to drop it. */
+        clusterSendSetAck(ctx,sender_id,j);
+    }
+}
+
+/* See receiveWorkingAndQueued() for more info. */
+void WORKINGcallback(RedisModuleCtx *ctx, const char *sender_id, uint8_t msgtype, const unsigned char *payload, uint32_t len) {
+    receiveWorkingAndQueued(ctx,sender_id,payload,len,msgtype);
+}
+
+/* See receiveWorkingAndQueued() for more info. */
+void QUEUEDcallback(RedisModuleCtx *ctx, const char *sender_id, uint8_t msgtype, const unsigned char *payload, uint32_t len) {
+    receiveWorkingAndQueued(ctx,sender_id,payload,len,msgtype);
+}
+
+/* We receive WILLQUEUE messages when nodes are about to queue a given
+ * message (a few milliseconds before). This way the receiver may react
+ * accordingly: if the have the message already queued, we send a
+ * QUEUED message, so that the sender avoids to queue the message another
+ * time. If instead the message is already acknowledged as processed, we
+ * inform the sender with a SETACK message. */
+void WILLQUEUEcallback(RedisModuleCtx *ctx, const char *sender_id, uint8_t msgtype, const unsigned char *payload, uint32_t len) {
+    if (validateMessage(ctx,sender_id,payload,len,msgtype) == 0)
+        return;
+
+    clusterJobIDMessage *hdr = (clusterJobIDMessage*) payload;
+    job *j = lookupJob(hdr->id);
+    if (j) {
+        if (j->state == JOB_STATE_ACTIVE ||
+            j->state == JOB_STATE_QUEUED)
+        {
+            raxInsert(j->nodes_delivered,
+                (unsigned char*)sender_id,REDISMODULE_NODE_ID_LEN,
+                NULL,NULL);
+        }
+        if (j->state == JOB_STATE_QUEUED)
+            clusterBroadcastQueued(ctx,j,DISQUE_MSG_NOFLAGS);
+        else if (j->state == JOB_STATE_ACKED)
+            clusterSendSetAck(ctx,sender_id,j);
+    }
+}
+
+/* Receive the NEEDJOBS and PAUSE messages, that are messages citing a
+ * specific queue name, because other nodes either need us to transfer
+ * jobs about this queue to them, or to pause/resume the queue. */
+void receiveNeedjobsAndPause(RedisModuleCtx *ctx, const char *sender_id, const unsigned char *payload, uint32_t len, int msgtype) {
+   if (validateMessage(ctx,sender_id,payload,len,msgtype) == 0)
+        return;
+
+    clusterQueueMessage *hdr = (clusterQueueMessage*) payload;
+    uint32_t qnamelen = ntohl(hdr->qnamelen);
+    uint32_t count = ntohl(hdr->aux);
+
+    RedisModule_Log(ctx,"verbose","RECEIVED %s FOR QUEUE %.*s (aux=%d)",
+        (msgtype == DISQUE_MSG_NEEDJOBS) ? "NEEDJOBS" : "PAUSE",
+        (int)qnamelen,hdr->qname,count);
+    if (msgtype == DISQUE_MSG_NEEDJOBS)
+        receiveNeedJobs(ctx,sender_id,hdr->qname,qnamelen,count);
+    else
+        receivePauseQueue(ctx,hdr->qname,qnamelen,count);
+}
+
+void NEEDJOBScallback(RedisModuleCtx *ctx, const char *sender_id, uint8_t msgtype, const unsigned char *payload, uint32_t len) {
+    receiveNeedjobsAndPause(ctx,sender_id,payload,len,msgtype);
+}
+
+void PAUSEcallback(RedisModuleCtx *ctx, const char *sender_id, uint8_t msgtype, const unsigned char *payload, uint32_t len) {
+    receiveNeedjobsAndPause(ctx,sender_id,payload,len,msgtype);
 }
 
 /* -----------------------------------------------------------------------------
  * CLUSTER job related messages
  * -------------------------------------------------------------------------- */
+
+/* This is a wrapper for RedisModule_SendClusterMessage() sending the message
+ * to all the node IDs stored into the radix tree 'nodes'. */
+void clusterBroadcastMessage(RedisModuleCtx *ctx, rax *nodes, int type, const unsigned char *msg, uint32_t msglen) {
+    if (nodes == NULL) {
+        RedisModule_SendClusterMessage(ctx,NULL,type,
+            (unsigned char*)msg,msglen);
+    } else {
+        const char *myself = RedisModule_GetMyClusterID();
+        raxIterator ri;
+        raxStart(&ri,nodes);
+        raxSeek(&ri,"^",NULL,0);
+        while(raxNext(&ri)) {
+            if (memcmp(myself,ri.key,ri.key_len) == 0) continue;
+            RedisModule_SendClusterMessage(ctx,(char*)ri.key,type,
+                (unsigned char*)msg,msglen);
+        }
+        raxStop(&ri);
+    }
+}
 
 /* Broadcast a REPLJOB message to 'repl' nodes, and populates the list of jobs
  * that may have the job.
@@ -484,21 +467,22 @@ int clusterProcessPacket(clusterLink *link) {
  * is true we also flag the message with NOREPLY regardless of the fact the
  * node we are sending REPLJOB to already replied or not.
  *
- * Nodes are selected from server.cluster->reachable_nodes list.
+ * Nodes are selected from ClusterReachableNodes list.
  * The function returns the number of new (additional) nodes that MAY have
  * received the message. */
-int clusterReplicateJob(job *j, int repl, int noreply) {
+int clusterReplicateJob(RedisModuleCtx *ctx, job *j, int repl, int noreply) {
     int i, added = 0;
 
     if (repl <= 0) return 0;
 
     /* Add the specified number of nodes to the list of receivers. */
     clusterShuffleReachableNodes();
-    for (i = 0; i < server.cluster->reachable_nodes_count; i++) {
-        clusterNode *node = server.cluster->reachable_nodes[i];
+    for (i = 0; i < ClusterReachableNodesCount; i++) {
+        const char *nodeid = ClusterReachableNodes[i];
 
-        if (node->link == NULL) continue; /* No link, no party... */
-        if (dictAdd(j->nodes_delivered,node->name,node) == DICT_OK) {
+        if (raxInsert(j->nodes_delivered,(unsigned char*)nodeid,
+            REDISMODULE_NODE_ID_LEN,NULL,NULL))
+        {
             /* Only counts non-duplicated nodes. */
             added++;
             if (--repl == 0) break;
@@ -506,95 +490,94 @@ int clusterReplicateJob(job *j, int repl, int noreply) {
     }
 
     /* Resend the message to all the past and new nodes. */
-    unsigned char buf[sizeof(clusterMsg)], *payload;
-    clusterMsg *hdr = (clusterMsg*) buf;
+    unsigned char buf[sizeof(clusterSerializedJobMessage)], *payload;
+    clusterSerializedJobMessage *hdr = (clusterSerializedJobMessage*) buf;
     uint32_t totlen;
 
     sds serialized = serializeJob(sdsempty(),j,SER_MESSAGE);
 
-    totlen = sizeof(clusterMsg)-sizeof(union clusterMsgData);
-    totlen += sizeof(clusterMsgDataJob) -
-              sizeof(hdr->data.jobs.serialized.jobs_data) +
-              sdslen(serialized);
+    memset(hdr,0,sizeof(*hdr));
+    totlen = sizeof(clusterSerializedJobMessage)-sizeof(hdr->jobs_data);
+    totlen += sdslen(serialized);
 
-    clusterBuildMessageHdr(hdr,CLUSTERMSG_TYPE_REPLJOB);
-    hdr->data.jobs.serialized.numjobs = htonl(1);
-    hdr->data.jobs.serialized.datasize = htonl(sdslen(serialized));
-    hdr->totlen = htonl(totlen);
+    hdr->numjobs = htonl(1);
+    hdr->datasize = htonl(sdslen(serialized));
 
-    if (totlen < sizeof(buf)) {
+    if (totlen <= sizeof(buf)) {
         payload = buf;
     } else {
-        payload = zmalloc(totlen);
-        memcpy(payload,buf,sizeof(clusterMsg));
-        hdr = (clusterMsg*) payload;
+        payload = RedisModule_Alloc(totlen);
+        memcpy(payload,buf,sizeof(buf));
+        hdr = (clusterSerializedJobMessage*) payload;
     }
-    memcpy(hdr->data.jobs.serialized.jobs_data,serialized,sdslen(serialized));
+    memcpy(hdr->jobs_data,serialized,sdslen(serialized));
     sdsfree(serialized);
 
     /* Actual delivery of the message to the list of nodes. */
-    dictIterator *di = dictGetIterator(j->nodes_delivered);
-    dictEntry *de;
+    raxIterator ri;
+    raxStart(&ri,j->nodes_delivered);
+    raxSeek(&ri,"^",NULL,0);
 
-    while((de = dictNext(di)) != NULL) {
-        clusterNode *node = dictGetVal(de);
-        if (node == myself) continue;
+    const char *myself = RedisModule_GetMyClusterID();
+    while(raxNext(&ri)) {
+        char *receiver = (char*)ri.key;
+        if (memcmp(myself,receiver,ri.key_len) == 0) continue;
 
         /* We ask for reply only if 'noreply' is false and the target node
          * did not already replied with GOTJOB. */
-        int acked = j->nodes_confirmed && dictFind(j->nodes_confirmed,node);
+        int acked = j->nodes_confirmed &&
+                    raxFind(j->nodes_confirmed,
+                            (unsigned char*)receiver,ri.key_len)
+                            != raxNotFound;
         if (noreply || acked) {
-            hdr->mflags[0] |= CLUSTERMSG_FLAG0_NOREPLY;
+            hdr->flags[0] |= DISQUE_MSG_FLAG0_NOREPLY;
         } else {
-            hdr->mflags[0] &= ~CLUSTERMSG_FLAG0_NOREPLY;
+            hdr->flags[0] &= ~DISQUE_MSG_FLAG0_NOREPLY;
         }
 
         /* If the target node acknowledged the message already, send it again
-         * only if there are additional nodes. We want the target node to refresh
-         * its list of receivers. */
-        if (node->link && !(acked && added == 0))
-            clusterSendMessage(node->link,payload,totlen);
+         * only if there are additional nodes. We want the target node to
+         * refresh its list of receivers. */
+        if (!acked || added != 0)
+            RedisModule_SendClusterMessage(ctx,receiver,DISQUE_MSG_REPLJOB,
+                                           payload,totlen);
     }
-    dictReleaseIterator(di);
+    raxStop(&ri);
 
-    if (payload != buf) zfree(payload);
+    if (payload != buf) RedisModule_Free(payload);
     return added;
 }
 
 /* Helper function to send all the messages that have just a type,
  * a Job ID, and an optional 'aux' additional value. */
-void clusterSendJobIDMessage(int type, clusterNode *node, char *id, int aux) {
-    unsigned char buf[sizeof(clusterMsg)];
-    clusterMsg *hdr = (clusterMsg*) buf;
-
-    if (node->link == NULL) return; /* This is a best effort message. */
-    clusterBuildMessageHdr(hdr,type);
-    memcpy(hdr->data.jobid.job.id,id,JOB_ID_LEN);
-    hdr->data.jobid.job.aux = htonl(aux);
-    clusterSendMessage(node->link,buf,ntohl(hdr->totlen));
+void clusterSendJobIDMessage(RedisModuleCtx *ctx, int type, const char *receiver, char *id, int aux) {
+    clusterJobIDMessage msg;
+    memset(&msg,0,sizeof(msg));
+    memcpy(msg.id,id,JOB_ID_LEN);
+    msg.aux = htonl(aux);
+    RedisModule_SendClusterMessage(ctx,(char*)receiver,type,
+        (unsigned char*)&msg,sizeof(msg));
 }
 
 /* Like clusterSendJobIDMessage(), but sends the message to the specified set
- * of nodes (excluding myself if included in the set of nodes). */
-void clusterBroadcastJobIDMessage(dict *nodes, char *id, int type, uint32_t aux, unsigned char flags) {
-    dictIterator *di = dictGetIterator(nodes);
-    dictEntry *de;
-    unsigned char buf[sizeof(clusterMsg)];
-    clusterMsg *hdr = (clusterMsg*) buf;
+ * of nodes (excluding myself if included in the set of nodes).
+ * If nodes is set to NULL sends the message to all the nodes. */
+void clusterBroadcastJobIDMessage(RedisModuleCtx *ctx, rax *nodes, const char *id, int type, uint32_t aux, unsigned char flags) {
+    clusterJobIDMessage msg;
 
     /* Build the message one time, send the same to everybody. */
-    clusterBuildMessageHdr(hdr,type);
-    memcpy(hdr->data.jobid.job.id,id,JOB_ID_LEN);
-    hdr->data.jobid.job.aux = htonl(aux);
-    hdr->mflags[0] = flags;
+    memset(&msg,0,sizeof(msg));
+    memcpy(msg.id,id,JOB_ID_LEN);
+    msg.aux = htonl(aux);
+    msg.flags[0] = flags;
 
-    while((de = dictNext(di)) != NULL) {
-        clusterNode *node = dictGetVal(de);
-        if (node == myself) continue;
-        if (node->link)
-            clusterSendMessage(node->link,buf,ntohl(hdr->totlen));
+    if (nodes == NULL) {
+        RedisModule_SendClusterMessage(ctx,NULL,type,
+            (unsigned char*)&msg,sizeof(msg));
+    } else {
+        clusterBroadcastMessage(ctx,nodes,type,
+            (unsigned char*)&msg,sizeof(msg));
     }
-    dictReleaseIterator(di);
 }
 
 /* Send a GOTJOB message to the specified node, if connected.
@@ -602,14 +585,14 @@ void clusterBroadcastJobIDMessage(dict *nodes, char *id, int type, uint32_t aux,
  * that the job was replicated to a target node. The receiver of the message
  * will be able to reply to the client that the job was accepted by the
  * system when enough nodes have a copy of the job. */
-void clusterSendGotJob(clusterNode *node, job *j) {
-    clusterSendJobIDMessage(CLUSTERMSG_TYPE_GOTJOB,node,j->id,0);
+void clusterSendGotJob(RedisModuleCtx *ctx, const char *receiver, job *j) {
+    clusterSendJobIDMessage(ctx,DISQUE_MSG_GOTJOB,receiver,j->id,0);
 }
 
 /* Force the receiver to queue a job, if it has that job in an active
  * state. */
-void clusterSendEnqueue(clusterNode *node, job *j, uint32_t delay) {
-    clusterSendJobIDMessage(CLUSTERMSG_TYPE_ENQUEUE,node,j->id,delay);
+void clusterSendEnqueue(RedisModuleCtx *ctx, const char *receiver, job *j, uint32_t delay) {
+    clusterSendJobIDMessage(ctx,DISQUE_MSG_ENQUEUE,receiver,j->id,delay);
 }
 
 /* Tell the receiver that the specified job was just re-queued by the
@@ -620,134 +603,121 @@ void clusterSendEnqueue(clusterNode *node, job *j, uint32_t delay) {
  *
  * This message is sent to all the nodes we believe may have a copy
  * of the message and are reachable. */
-void clusterBroadcastQueued(job *j, unsigned char flags) {
-    serverLog(LL_VERBOSE,"BCAST QUEUED: %.*s",JOB_ID_LEN,j->id);
-    clusterBroadcastJobIDMessage(j->nodes_delivered,j->id,
-                                 CLUSTERMSG_TYPE_QUEUED,0,flags);
+void clusterBroadcastQueued(RedisModuleCtx *ctx, job *j, unsigned char flags) {
+    RedisModule_Log(ctx,"verbose","BCAST QUEUED: %.*s",JOB_ID_LEN,j->id);
+    clusterBroadcastJobIDMessage(ctx,j->nodes_delivered,j->id,
+                                 DISQUE_MSG_QUEUED,0,flags);
 }
 
 /* WORKING is like QUEUED, but will always force the receiver to dequeue. */
-void clusterBroadcastWorking(job *j) {
-    serverLog(LL_VERBOSE,"BCAST WORKING: %.*s",JOB_ID_LEN,j->id);
-    clusterBroadcastJobIDMessage(j->nodes_delivered,j->id,
-                                 CLUSTERMSG_TYPE_WORKING,0,CLUSTERMSG_NOFLAGS);
+void clusterBroadcastWorking(RedisModuleCtx *ctx, job *j) {
+    RedisModule_Log(ctx,"verbose","BCAST WORKING: %.*s",JOB_ID_LEN,j->id);
+    clusterBroadcastJobIDMessage(ctx,j->nodes_delivered,j->id,
+                                 DISQUE_MSG_WORKING,0,DISQUE_MSG_NOFLAGS);
 }
 
 /* Send a DELJOB message to all the nodes that may have a copy. */
-void clusterBroadcastDelJob(job *j) {
-    serverLog(LL_VERBOSE,"BCAST DELJOB: %.*s",JOB_ID_LEN,j->id);
-    clusterBroadcastJobIDMessage(j->nodes_delivered,j->id,
-                                 CLUSTERMSG_TYPE_DELJOB,0,CLUSTERMSG_NOFLAGS);
+void clusterBroadcastDelJob(RedisModuleCtx *ctx, job *j) {
+    RedisModule_Log(ctx,"verbose","BCAST DELJOB: %.*s",JOB_ID_LEN,j->id);
+    clusterBroadcastJobIDMessage(ctx,j->nodes_delivered,j->id,
+                                 DISQUE_MSG_DELJOB,0,DISQUE_MSG_NOFLAGS);
 }
 
 /* Tell the receiver to reply with a QUEUED message if it has the job
  * already queued, to prevent us from queueing it in the next few
  * milliseconds. */
-void clusterSendWillQueue(job *j) {
-    serverLog(LL_VERBOSE,"BCAST WILLQUEUE: %.*s",JOB_ID_LEN,j->id);
-    clusterBroadcastJobIDMessage(j->nodes_delivered,j->id,
-                                 CLUSTERMSG_TYPE_WILLQUEUE,0,CLUSTERMSG_NOFLAGS);
+void clusterSendWillQueue(RedisModuleCtx *ctx, job *j) {
+    RedisModule_Log(ctx,"verbose","BCAST WILLQUEUE: %.*s",JOB_ID_LEN,j->id);
+    clusterBroadcastJobIDMessage(ctx,j->nodes_delivered,j->id,
+                                 DISQUE_MSG_WILLQUEUE,0,DISQUE_MSG_NOFLAGS);
 }
 
 /* Force the receiver to acknowledge the job as delivered. */
-void clusterSendSetAck(clusterNode *node, job *j) {
-    uint32_t maxowners = dictSize(j->nodes_delivered);
-    clusterSendJobIDMessage(CLUSTERMSG_TYPE_SETACK,node,j->id,maxowners);
+void clusterSendSetAck(RedisModuleCtx *ctx, const char *receiver, job *j) {
+    uint32_t maxowners = raxSize(j->nodes_delivered);
+    clusterSendJobIDMessage(ctx,DISQUE_MSG_SETACK,receiver,j->id,maxowners);
 }
 
 /* Acknowledge a SETACK message. */
-void clusterSendGotAck(clusterNode *node, char *jobid, int known) {
-    clusterSendJobIDMessage(CLUSTERMSG_TYPE_GOTACK,node,jobid,known);
+void clusterSendGotAck(RedisModuleCtx *ctx, const char *receiver, char *jobid, int known) {
+    clusterSendJobIDMessage(ctx,DISQUE_MSG_GOTACK,receiver,jobid,known);
 }
 
 /* Send a NEEDJOBS message to the specified set of nodes. */
-void clusterSendNeedJobs(robj *qname, int numjobs, dict *nodes) {
-    uint32_t totlen, qnamelen = sdslen(qname->ptr);
-    uint32_t alloclen;
-    clusterMsg *hdr;
+void clusterSendNeedJobs(RedisModuleCtx *ctx, sds qname, int numjobs, rax *nodes) {
+    clusterQueueMessage *msg;
+    uint32_t totlen;
+    size_t qnamelen = sdslen(qname);
 
-    serverLog(LL_VERBOSE,"Sending NEEDJOBS for %s %d, %d nodes",
-        (char*)qname->ptr, (int)numjobs, (int)dictSize(nodes));
+    RedisModule_Log(ctx,"verbose","Sending NEEDJOBS for %s %d, %d nodes",
+        qname, (int)numjobs, nodes ? (int)raxSize(nodes) : -1);
 
-    totlen = sizeof(clusterMsg)-sizeof(union clusterMsgData);
-    totlen += sizeof(clusterMsgDataQueueOp) - 8 + qnamelen;
-    alloclen = totlen;
-    if (alloclen < (int)sizeof(clusterMsg)) alloclen = sizeof(clusterMsg);
-    hdr = zmalloc(alloclen);
-
-    clusterBuildMessageHdr(hdr,CLUSTERMSG_TYPE_NEEDJOBS);
-    hdr->data.queueop.about.aux = htonl(numjobs);
-    hdr->data.queueop.about.qnamelen = htonl(qnamelen);
-    memcpy(hdr->data.queueop.about.qname, qname->ptr, qnamelen);
-    hdr->totlen = htonl(totlen);
-    clusterBroadcastMessage(nodes,hdr,totlen);
-    zfree(hdr);
+    totlen = sizeof(*msg) - sizeof(msg->qname) + qnamelen;
+    msg = RedisModule_Alloc(totlen);
+    msg->aux = htonl(numjobs);
+    msg->qnamelen = htonl(qnamelen);
+    memcpy(msg->qname, qname, qnamelen);
+    clusterBroadcastMessage(ctx,nodes,DISQUE_MSG_NEEDJOBS,
+        (unsigned char*)msg,totlen);
+    RedisModule_Free(msg);
 }
 
 /* Send a PAUSE message to the specified set of nodes. */
-void clusterSendPause(robj *qname, uint32_t flags, dict *nodes) {
-    uint32_t totlen, qnamelen = sdslen(qname->ptr);
-    uint32_t alloclen;
-    clusterMsg *hdr;
+void clusterSendPause(RedisModuleCtx *ctx, const char *qname, size_t qnamelen, uint32_t flags, rax *nodes) {
+    uint32_t totlen;
+    clusterQueueMessage *hdr;
 
-    serverLog(LL_VERBOSE,"Sending PAUSE for %s flags=%d, %d nodes",
-        (char*)qname->ptr, (int)flags, (int)dictSize(nodes));
+    RedisModule_Log(ctx,"verbose","Sending PAUSE for %.*s flags=%d",
+        (int)qnamelen, (char*)qname, (int)flags);
 
-    totlen = sizeof(clusterMsg)-sizeof(union clusterMsgData);
-    totlen += sizeof(clusterMsgDataQueueOp) - 8 + qnamelen;
-    alloclen = totlen;
-    if (alloclen < (int)sizeof(clusterMsg)) alloclen = sizeof(clusterMsg);
-    hdr = zmalloc(alloclen);
+    totlen = sizeof(clusterQueueMessage)-sizeof(hdr->qname)+qnamelen;
+    hdr = RedisModule_Alloc(totlen);
+    memset(hdr,0,totlen);
 
-    clusterBuildMessageHdr(hdr,CLUSTERMSG_TYPE_PAUSE);
-    hdr->data.queueop.about.aux = htonl(flags);
-    hdr->data.queueop.about.qnamelen = htonl(qnamelen);
-    memcpy(hdr->data.queueop.about.qname, qname->ptr, qnamelen);
-    hdr->totlen = htonl(totlen);
-    clusterBroadcastMessage(nodes,hdr,totlen);
-    zfree(hdr);
+    hdr->aux = htonl(flags);
+    hdr->qnamelen = htonl(qnamelen);
+    memcpy(hdr->qname, qname, qnamelen);
+    clusterBroadcastMessage(ctx,nodes,DISQUE_MSG_PAUSE,
+        (unsigned char*)hdr,totlen);
+    RedisModule_Free(hdr);
 }
 
 /* Same as clusterSendPause() but broadcasts the message to the
  * whole cluster. */
-void clusterBroadcastPause(robj *qname, uint32_t flags) {
-    clusterSendPause(qname,flags,server.cluster->nodes);
+void clusterBroadcastPause(RedisModuleCtx *ctx, const char *qname, size_t qnamelen, uint32_t flags) {
+    clusterSendPause(ctx,qname,qnamelen,flags,NULL);
 }
 
 /* Send a YOURJOBS message to the specified node, with a serialized copy of
  * the jobs referneced by the 'jobs' array and containing 'count' jobs. */
-void clusterSendYourJobs(clusterNode *node, job **jobs, uint32_t count) {
-    unsigned char buf[sizeof(clusterMsg)], *payload;
-    clusterMsg *hdr = (clusterMsg*) buf;
+void clusterSendYourJobs(RedisModuleCtx *ctx, const char *node, job **jobs, uint32_t count) {
+    unsigned char buf[sizeof(clusterSerializedJobMessage)], *payload;
+    clusterSerializedJobMessage *hdr = (clusterSerializedJobMessage*) buf;
     uint32_t totlen, j;
 
-    if (!node->link) return;
+    RedisModule_Log(ctx,"verbose",
+        "Sending %d jobs to %.40s", (int)count,node);
 
-    serverLog(LL_VERBOSE,"Sending %d jobs to %.40s", (int)count,node->name);
-
-    totlen = sizeof(clusterMsg)-sizeof(union clusterMsgData);
-    totlen += sizeof(clusterMsgDataJob) -
-              sizeof(hdr->data.jobs.serialized.jobs_data);
-
+    totlen = sizeof(clusterSerializedJobMessage)-sizeof(hdr->jobs_data);
     sds serialized = sdsempty();
     for (j = 0; j < count; j++)
         serialized = serializeJob(serialized,jobs[j],SER_MESSAGE);
     totlen += sdslen(serialized);
 
-    clusterBuildMessageHdr(hdr,CLUSTERMSG_TYPE_YOURJOBS);
-    hdr->data.jobs.serialized.numjobs = htonl(count);
-    hdr->data.jobs.serialized.datasize = htonl(sdslen(serialized));
-    hdr->totlen = htonl(totlen);
+    memset(hdr,0,sizeof(buf));
+    hdr->numjobs = htonl(count);
+    hdr->datasize = htonl(sdslen(serialized));
 
-    if (totlen < sizeof(buf)) {
+    if (totlen <= sizeof(buf)) {
         payload = buf;
     } else {
-        payload = zmalloc(totlen);
-        memcpy(payload,buf,sizeof(clusterMsg));
-        hdr = (clusterMsg*) payload;
+        payload = RedisModule_Alloc(totlen);
+        memcpy(payload,buf,sizeof(buf));
+        hdr = (clusterSerializedJobMessage*) payload;
     }
-    memcpy(hdr->data.jobs.serialized.jobs_data,serialized,sdslen(serialized));
+    memcpy(hdr->jobs_data,serialized,sdslen(serialized));
     sdsfree(serialized);
-    clusterSendMessage(node->link,payload,totlen);
-    if (payload != buf) zfree(payload);
+    RedisModule_SendClusterMessage(ctx,(char*)node,DISQUE_MSG_YOURJOBS,
+                                   payload,totlen);
+    if (payload != buf) RedisModule_Free(payload);
 }

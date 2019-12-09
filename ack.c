@@ -1,14 +1,11 @@
 /* Acknowledges handling and commands.
  *
- * Copyright (c) 2014, Salvatore Sanfilippo <antirez at gmail dot com>
- * All rights reserved.
- *
+ * Copyright (c) 2014-2019, Salvatore Sanfilippo <antirez at gmail dot com>
+ * All rights reserved. This code is under the AGPL license, check the
+ * LICENSE file for more info.
  */
 
-#include "server.h"
-#include "cluster.h"
-#include "job.h"
-#include "queue.h"
+#include "disque.h"
 
 /* ------------------------- Low level ack functions ------------------------ */
 
@@ -23,7 +20,7 @@ void acknowledgeJob(job *job) {
      * tryJobGC() will take care to create a new one used for the GC
      * process. */
     if (job->nodes_confirmed) {
-        dictRelease(job->nodes_confirmed);
+        raxFree(job->nodes_confirmed);
         job->nodes_confirmed = NULL;
     }
     updateJobAwakeTime(job,0); /* Make sure we'll schedule a job GC. */
@@ -39,15 +36,15 @@ mstime_t getNextGCRetryTime(job *job) {
     if (period > JOB_GC_RETRY_MAX_PERIOD) period = JOB_GC_RETRY_MAX_PERIOD;
     /* Desync a bit the GC process, it is a waste of resources for
      * multiple nodes to try to GC at the same time. */
-    return server.mstime + period + randomTimeError(500);
+    return mstime() + period + randomTimeError(500);
 }
 
 /* Try to garbage collect the job. */
-void tryJobGC(job *job) {
+void tryJobGC(RedisModuleCtx *ctx, job *job) {
     if (job->state != JOB_STATE_ACKED) return;
 
-    int dummy_ack = dictSize(job->nodes_delivered) == 0;
-    serverLog(LL_VERBOSE,"GC %.*s",JOB_ID_LEN,job->id);
+    int dummy_ack = raxSize(job->nodes_delivered) == 0;
+    RedisModule_Log(ctx,"verbose","GC %.*s",JOB_ID_LEN,job->id);
 
     /* Don't overflow the count, it's only useful for the exponential delay.
      * Actually we'll keep trying forever. */
@@ -57,8 +54,9 @@ void tryJobGC(job *job) {
      * job in ACKed state, so that the job can be evicted when we are
      * confident the job will not be reissued. */
     if (job->nodes_confirmed == NULL) {
-        job->nodes_confirmed = dictCreate(&clusterNodesDictType,NULL);
-        dictAdd(job->nodes_confirmed,myself->name,myself);
+        job->nodes_confirmed = raxNew();
+        const char *myself = RedisModule_GetMyClusterID();
+        raxInsert(job->nodes_confirmed,(unsigned char*)myself,REDISMODULE_NODE_ID_LEN,NULL,NULL);
     }
 
     /* Check ASAP if we already reached all the nodes. This special case
@@ -72,14 +70,14 @@ void tryJobGC(job *job) {
      * of the cluster getting resized to a single node. */
     int all_nodes_reached =
         (!dummy_ack) &&
-        (dictSize(job->nodes_delivered) == dictSize(job->nodes_confirmed));
-    int dummy_ack_single_node = dummy_ack && server.cluster->size == 1;
+        (raxSize(job->nodes_delivered) == raxSize(job->nodes_confirmed));
+    int dummy_ack_single_node = dummy_ack && RedisModule_GetClusterSize() == 1;
 
     if (all_nodes_reached || dummy_ack_single_node) {
-        serverLog(LL_VERBOSE,
-            "Deleting %.48s: all nodes reached in tryJobGC()",
-            job->id);
-        unregisterJob(job);
+        RedisModule_Log(ctx,"verbose",
+            "Deleting %.*s: all nodes reached in tryJobGC()",
+            JOB_ID_LEN, job->id);
+        unregisterJob(ctx,job);
         freeJob(job);
         return;
     }
@@ -89,24 +87,26 @@ void tryJobGC(job *job) {
      * is a dummy ACK (created by ACKJOB command acknowledging a job we don't
      * know) we have to broadcast the SETACK to everybody in search of the
      * owner. */
-    dict *targets = dictSize(job->nodes_delivered) == 0 ?
-                    server.cluster->nodes : job->nodes_delivered;
-    dictForeach(targets,de)
-        clusterNode *node = dictGetVal(de);
-        if (dictFind(job->nodes_confirmed,node->name) == NULL)
-            clusterSendSetAck(node,job);
-    dictEndForeach
+    if (raxSize(job->nodes_delivered)) {
+        raxIterator ri;
+        raxStart(&ri,job->nodes_delivered);
+        raxSeek(&ri,"^",NULL,0);
+        clusterSendSetAck(ctx,(char*)ri.key,job);
+        raxStop(&ri);
+    } else {
+        clusterSendSetAck(ctx,NULL,job);
+    }
 }
 
 /* This function is called by cluster.c every time we receive a GOTACK message
  * about a job we know. */
-void gotAckReceived(clusterNode *sender, job *job, int known) {
+void gotAckReceived(RedisModuleCtx *ctx, const char *sender, job *job, int known) {
     /* A dummy ACK is an acknowledged job that we created just becakse a client
      * send us ACKJOB about a job we were not aware. */
-    int dummy_ack = dictSize(job->nodes_delivered) == 0;
+    int dummy_ack = raxSize(job->nodes_delivered) == 0;
 
-    serverLog(LL_VERBOSE,"RECEIVED GOTACK FROM %.40s FOR JOB %.48s",
-        sender->name, job->id);
+    RedisModule_Log(ctx,"verbose","RECEIVED GOTACK FROM %.*s FOR JOB %.*s",
+        sender, JOB_ID_LEN, job->id);
 
     /* We should never receive a GOTACK for a job which is not acknowledged,
      * but it is more robust to handle it explicitly. */
@@ -116,9 +116,9 @@ void gotAckReceived(clusterNode *sender, job *job, int known) {
      * it's up to it to perform the garbage collection, so we can forget about
      * this job and reclaim memory. */
     if (dummy_ack && known) {
-        serverLog(LL_VERBOSE,"Deleting %.48s: authoritative node reached",
-            job->id);
-        unregisterJob(job);
+        RedisModule_Log(ctx,"verbose","Deleting %.*s: authoritative node reached",
+            JOB_ID_LEN, job->id);
+        unregisterJob(ctx,job);
         freeJob(job);
         return;
     }
@@ -131,15 +131,20 @@ void gotAckReceived(clusterNode *sender, job *job, int known) {
      *    there... so this should be useless, but is a good invariant
      *    to enforce.
      * 2) Add the node to the list of nodes that acknowledged the ACK. */
-    if (known || dictFind(job->nodes_delivered,sender->name) != NULL) {
-        dictAdd(job->nodes_delivered,sender->name,sender);
+    if (known ||
+        raxFind(job->nodes_delivered,(unsigned char*)sender,
+                REDISMODULE_NODE_ID_LEN) != NULL)
+    {
+        raxInsert(job->nodes_delivered,(unsigned char*)sender,
+                  REDISMODULE_NODE_ID_LEN,NULL,NULL);
         /* job->nodes_confirmed exists if we started a job garbage collection,
          * but we may receive GOTACK messages in other conditions sometimes,
          * since we reply with SETACK to QUEUED and WILLQUEUE if the job is
          * acknowledged but we did not yet started to GC. So we need to test
          * if the hash table actually exists. */
         if (job->nodes_confirmed)
-            dictAdd(job->nodes_confirmed,sender->name,sender);
+            raxInsert(job->nodes_confirmed,(unsigned char*)sender,
+                      REDISMODULE_NODE_ID_LEN,NULL,NULL);
     }
 
     /* If our job is actually a dummy ACK, we are still interested to collect
@@ -147,13 +152,13 @@ void gotAckReceived(clusterNode *sender, job *job, int known) {
      * eventually if everybody in the cluster has no clue, we can safely remove
      * the dummy ACK. */
     if (!known && dummy_ack) {
-        dictAdd(job->nodes_confirmed,sender->name,sender);
-        if (dictSize(job->nodes_confirmed) >= dictSize(server.cluster->nodes))
-        {
-            serverLog(LL_VERBOSE,
-                "Deleting %.48s: dummy ACK not known cluster-wide",
-                job->id);
-            unregisterJob(job);
+        raxInsert(job->nodes_confirmed,(unsigned char*)sender,
+                  REDISMODULE_NODE_ID_LEN,NULL,NULL);
+        if (raxSize(job->nodes_confirmed) >= RedisModule_GetClusterSize()) {
+            RedisModule_Log(ctx,"verbose",
+                "Deleting %.*s: dummy ACK not known cluster-wide",
+                JOB_ID_LEN, job->id);
+            unregisterJob(ctx,job);
             freeJob(job);
             return;
         }
@@ -162,13 +167,13 @@ void gotAckReceived(clusterNode *sender, job *job, int known) {
     /* Finally the common case: our SETACK reached everybody. Broadcast
      * a DELJOB to all the nodes involved, and delete the job. */
     if (!dummy_ack && job->nodes_confirmed &&
-         dictSize(job->nodes_confirmed) >= dictSize(job->nodes_delivered))
+         raxSize(job->nodes_confirmed) >= raxSize(job->nodes_delivered))
     {
-        serverLog(LL_VERBOSE,
-            "Deleting %.48s: All nodes involved acknowledged the job",
-            job->id);
-        clusterBroadcastDelJob(job);
-        unregisterJob(job);
+        RedisModule_Log(ctx,"verbose",
+            "Deleting %.*s: All nodes involved acknowledged the job",
+            JOB_ID_LEN, job->id);
+        clusterBroadcastDelJob(ctx,job);
+        unregisterJob(ctx,job);
         freeJob(job);
         return;
     }
@@ -192,20 +197,22 @@ void gotAckReceived(clusterNode *sender, job *job, int known) {
  * The command returns the number of jobs already known and that were
  * already not in the ACKED state.
  */
-void ackjobCommand(client *c) {
+int ackjobCommand(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
     int j, known = 0;
+    int cluster_size = RedisModule_GetClusterSize();
 
-    if (validateJobIDs(c,c->argv+1,c->argc-1) == C_ERR) return;
+    if (validateJobIDs(ctx,argv+1,argc-1) == C_ERR) return REDISMODULE_OK;
 
     /* Perform the appropriate action for each job. */
-    for (j = 1; j < c->argc; j++) {
-        job *job = lookupJob(c->argv[j]->ptr);
+    for (j = 1; j < argc; j++) {
+        const char *jobid = RedisModule_StringPtrLen(argv[j],NULL);
+        job *job = lookupJob(jobid);
         /* Case 1: No such job. Create one just to hold the ACK. However
          * if the cluster is composed by a single node we are sure the job
          * does not exist in the whole cluster, so do this only if the
          * cluster size is greater than one. */
-        if (job == NULL && server.cluster->size > 1 && !myselfLeaving()) {
-            char *id = c->argv[j]->ptr;
+        if (job == NULL && cluster_size > 1 && !myselfLeaving()) {
+            const char *id = RedisModule_StringPtrLen(argv[j],NULL);
             int ttl = getRawTTLFromJobID(id);
 
             /* TTL is even for "at most once" jobs. In this case we
@@ -213,7 +220,7 @@ void ackjobCommand(client *c) {
             if (ttl & 1) {
                 job = createJob(id,JOB_STATE_ACKED,0,0);
                 setJobTTLFromID(job);
-                serverAssert(registerJob(job) == C_OK);
+                RedisModule_Assert(registerJob(job) == C_OK);
             }
         }
         /* Case 2: Job exists and is not acknowledged. Change state. */
@@ -223,9 +230,9 @@ void ackjobCommand(client *c) {
             known++;
         }
         /* Anyway... start a GC attempt on the acked job. */
-        if (job) tryJobGC(job);
+        if (job) tryJobGC(ctx,job);
     }
-    addReplyLongLong(c,known);
+    return RedisModule_ReplyWithLongLong(ctx,known);
 }
 
 /* FASTACK jobid_1 jobid_2 ... jobid_N
@@ -244,25 +251,26 @@ void ackjobCommand(client *c) {
  * The command returns the number of jobs that are deleted from the local
  * node as a result of receiving the command.
  */
-void fastackCommand(client *c) {
+int fastackCommand(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
     int j, known = 0;
 
-    if (validateJobIDs(c,c->argv+1,c->argc-1) == C_ERR) return;
+    if (validateJobIDs(ctx,argv+1,argc-1) == C_ERR) return REDISMODULE_OK;
 
     /* Perform the appropriate action for each job. */
-    for (j = 1; j < c->argc; j++) {
-        job *job = lookupJob(c->argv[j]->ptr);
+    for (j = 1; j < argc; j++) {
+        job *job = lookupJob(RedisModule_StringPtrLen(argv[j],NULL));
         if (job == NULL) {
             /* Job not known, just broadcast the DELJOB message to everybody. */
-            clusterBroadcastJobIDMessage(server.cluster->nodes,c->argv[j]->ptr,
-                                         CLUSTERMSG_TYPE_DELJOB,0,
-                                         CLUSTERMSG_NOFLAGS);
+            clusterBroadcastJobIDMessage(ctx,NULL,
+                RedisModule_StringPtrLen(argv[j],NULL),
+                DISQUE_MSG_DELJOB,0,
+                DISQUE_MSG_NOFLAGS);
         } else {
-            clusterBroadcastDelJob(job);
-            unregisterJob(job);
+            clusterBroadcastDelJob(ctx,job);
+            unregisterJob(ctx,job);
             freeJob(job);
             known++;
         }
     }
-    addReplyLongLong(c,known);
+    return RedisModule_ReplyWithLongLong(ctx,known);
 }
