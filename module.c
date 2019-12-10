@@ -63,9 +63,6 @@ void disqueCron(RedisModuleCtx *ctx, void *data) {
      * for. */
     clientsCronSendNeedJobs(ctx);
 
-    /* Add nodes to jobs that are slow to get replicated. */
-    handleDelayedJobReplication(ctx);
-
     /* Setup the timer for the next call. */
     RedisModule_CreateTimer(ctx,1000,disqueCron,NULL);
 }

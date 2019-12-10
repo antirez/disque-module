@@ -548,6 +548,10 @@ void processJobs(RedisModuleCtx *ctx, void *clientData) {
     if (canlog) RedisModule_Log(ctx,"verbose","---");
 #endif
 
+    /* Add nodes to jobs that are slow to get replicated. */
+    handleDelayedJobReplication(ctx);
+
+    /* Get scheduled to be called again after 'period' milliseconds. */
     RedisModule_CreateTimer(ctx,period,processJobs,NULL);
 }
 
