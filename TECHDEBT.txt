@@ -15,10 +15,6 @@ Technical debts in Disque as a module
     - From time to time remove the "leaving" nodes from the radix tree if the
       last leaving report is older than a few minutes.
 
-* Implement clientsCronHandleDelayedJobReplication() with timers. Currently
-  the function is commented out, since it was designed to use the Redis
-  internals periodic client scanning feature.
-
 * Fix blocking in same queue mulitple times. Grep for blockForJobs().
 
 * Implement AOF and AOF rewriting, or an alternative file-based and threaded
