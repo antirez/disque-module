@@ -276,6 +276,21 @@ void GOTACKcallback(RedisModuleCtx *ctx, const char *sender_id, uint8_t msgtype,
     if (j) gotAckReceived(ctx,sender_id,j,known);
 }
 
+/* DELJOB message. Just remove the job, the sender is doing garbage collection
+ * for it. */
+void DELJOBcallback(RedisModuleCtx *ctx, const char *sender_id, uint8_t msgtype, const unsigned char *payload, uint32_t len) {
+    if (validateMessage(ctx,sender_id,payload,len,msgtype) == 0)
+        return;
+    clusterJobIDMessage *hdr = (clusterJobIDMessage*) payload;
+    job *j = lookupJob(hdr->id);
+    if (j) {
+        RedisModule_Log(ctx,"verbose",
+            "RECEIVED DELJOB FOR JOB %.*s",JOB_ID_LEN,j->id);
+        unregisterJob(ctx,j);
+        freeJob(j);
+    }
+}
+
 /* ENQUEUE message. Force the receiver to put a given job into the queue for
  * delivery. This is sent by nodes that created a job for a client, but are
  * under memory pressure and don't want to take a copy: they increase the

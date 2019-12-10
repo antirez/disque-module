@@ -121,6 +121,7 @@ void QUEUEDcallback(RedisModuleCtx *ctx, const char *sender_id, uint8_t msgtype,
 void WILLQUEUEcallback(RedisModuleCtx *ctx, const char *sender_id, uint8_t msgtype, const unsigned char *payload, uint32_t len);
 void NEEDJOBScallback(RedisModuleCtx *ctx, const char *sender_id, uint8_t msgtype, const unsigned char *payload, uint32_t len);
 void PAUSEcallback(RedisModuleCtx *ctx, const char *sender_id, uint8_t msgtype, const unsigned char *payload, uint32_t len);
+void DELJOBcallback(RedisModuleCtx *ctx, const char *sender_id, uint8_t msgtype, const unsigned char *payload, uint32_t len);
 
 #define UNIT_SECONDS 0
 #define UNIT_MILLISECONDS 1

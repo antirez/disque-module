@@ -105,8 +105,9 @@ void gotAckReceived(RedisModuleCtx *ctx, const char *sender, job *job, int known
      * send us ACKJOB about a job we were not aware. */
     int dummy_ack = raxSize(job->nodes_delivered) == 0;
 
-    RedisModule_Log(ctx,"verbose","RECEIVED GOTACK FROM %.*s FOR JOB %.*s",
-        sender, JOB_ID_LEN, job->id);
+    RedisModule_Log(ctx,"verbose",
+        "RECEIVED GOTACK FROM %.*s FOR JOB %.*s",
+        REDISMODULE_NODE_ID_LEN, sender, JOB_ID_LEN, job->id);
 
     /* We should never receive a GOTACK for a job which is not acknowledged,
      * but it is more robust to handle it explicitly. */
@@ -116,7 +117,8 @@ void gotAckReceived(RedisModuleCtx *ctx, const char *sender, job *job, int known
      * it's up to it to perform the garbage collection, so we can forget about
      * this job and reclaim memory. */
     if (dummy_ack && known) {
-        RedisModule_Log(ctx,"verbose","Deleting %.*s: authoritative node reached",
+        RedisModule_Log(ctx,"verbose",
+            "Deleting %.*s: authoritative node reached",
             JOB_ID_LEN, job->id);
         unregisterJob(ctx,job);
         freeJob(job);

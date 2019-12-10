@@ -153,6 +153,7 @@ int RedisModule_OnLoad(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) 
     RedisModule_RegisterClusterMessageReceiver(ctx,DISQUE_MSG_WILLQUEUE,WILLQUEUEcallback);
     RedisModule_RegisterClusterMessageReceiver(ctx,DISQUE_MSG_NEEDJOBS,NEEDJOBScallback);
     RedisModule_RegisterClusterMessageReceiver(ctx,DISQUE_MSG_PAUSE,PAUSEcallback);
+    RedisModule_RegisterClusterMessageReceiver(ctx,DISQUE_MSG_DELJOB,DELJOBcallback);
 
     initDisque();
     disqueCron(ctx,NULL);
