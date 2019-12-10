@@ -976,38 +976,37 @@ int jobReplicationAchieved(RedisModuleCtx *ctx, job *j) {
     return C_OK;
 }
 
-/* This function is called periodically by clientsCron(). Its goal is to
- * check if a client blocked waiting for a job synchronous replication
- * is taking too time, and add a new node to the set of nodes contacted
- * in order to replicate the job. This way some of the nodes initially
- * contacted are not reachable, are slow, or are out of memory (and are
- * not accepting our job), we have a chance to make the ADDJOB call
- * succeed using other nodes.
- *
- * The function always returns 0 since it never terminates the client.
- *
- * XXX: for the module version of Disque there is to implement this
- * in a different way, probably with a timer that checks on the job
- * state. */
-#if 0
+/* This function is called periodically by Disque. Its goal is to
+ * check if a job synchronous replication is taking too time, and add a new
+ * node to the set of nodes contacted in order to replicate the job.
+ * This way some of the nodes initially contacted are not reachable, are
+ * slow, or are out of memory (and are not accepting our job), we have a
+ * chance to make the ADDJOB call succeed using other nodes. */
 #define DELAYED_JOB_ADD_NODE_MIN_PERIOD 50 /* 50 milliseconds. */
-int clientsCronHandleDelayedJobReplication(client *c) {
-    /* Return ASAP if this client is not blocked for job replication. */
-    if (!(c->flags & CLIENT_BLOCKED) || c->btype != BLOCKED_JOB_REPL)
-        return 0;
+#define DELAYED_JOB_MAX_ITERATION 100 /* Don't check too many jobs per cycle. */
+void handleDelayedJobReplication(RedisModuleCtx *ctx) {
+    mstime_t now = mstime();
+    static unsigned char cursor[sizeof(RedisModuleBlockedClient*)];
 
-    /* Note that clientsCronHandleDelayedJobReplication() is called after
-     * refreshing server.mstime, so no need to call mstime() again here,
-     * we can use the cached value. However we use a fresh timestamp if
-     * we have to set added_node_time again. */
-    mstime_t elapsed = server.mstime - c->bpop.added_node_time;
-    if (elapsed >= DELAYED_JOB_ADD_NODE_MIN_PERIOD) {
-        if (clusterReplicateJob(c->bpop.job, 1, 0) > 0)
-            c->bpop.added_node_time = mstime();
+    raxIterator ri;
+    raxStart(&ri,BlockedOnRepl);
+    raxSeek(&ri,">",cursor,sizeof(cursor));
+    int maxiter = DELAYED_JOB_MAX_ITERATION;
+    while(maxiter > 0 && raxNext(&ri)) {
+        maxiter--;
+        job *j = ri.data;
+        mstime_t elapsed = now - j->added_node_time;
+        if (elapsed >= DELAYED_JOB_ADD_NODE_MIN_PERIOD) {
+            if (clusterReplicateJob(ctx,j,1,0) != 0)
+                RedisModule_Log(ctx,"verbose",
+                    "Delayed job %*s replicated to one more node.",
+                    JOB_ID_LEN, j->id);
+        }
     }
-    return 0;
+    /* If we scanned the full list. Restart from the first one next time. */
+    if (raxEOF(&ri)) memset(cursor,0,sizeof(cursor));
+    raxStop(&ri);
 }
-#endif
 
 /* Copy a Redis module string and return it as an SDS string. */
 sds RedisModule_StringToSds(RedisModuleString *s) {
@@ -1231,6 +1230,7 @@ int addjobCommand(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
     job->delay = delay;
     job->retry = retry;
     job->body = RedisModule_StringToSds(argv[2]);
+    job->added_node_time = now_ms;
 
     /* Set the next time the job will be queued. Note that once we call
      * enqueueJob() the first time, this will be set to 0 (never queue

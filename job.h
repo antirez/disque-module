@@ -122,6 +122,13 @@ typedef struct job {
                                ordered by awakeme time in the server.awakeme
                                skip list, unless awakeme is set to zero. */
     RedisModuleBlockedClient *bc;
+    mstime_t added_node_time;   /* The time at which we added more nodes for
+                                   replication. This is used for jobs that are
+                                   taking too much to get replicated to the
+                                   specified number of nodes: after some time
+                                   of the last node addition, we add new nodes
+                                   so that the job can reach the desired
+                                   replication factor instead of timing out. */
 } job;
 
 /* Number of bytes of directly serializable fields in the job structure. */
@@ -160,5 +167,6 @@ int addjobCommand(RedisModuleCtx *ctx, RedisModuleString **argv, int argc);
 int showCommand(RedisModuleCtx *ctx, RedisModuleString **argv, int argc);
 int deljobCommand(RedisModuleCtx *ctx, RedisModuleString **argv, int argc);
 void processJobs(RedisModuleCtx *ctx, void *clientData);
+void handleDelayedJobReplication(RedisModuleCtx *ctx);
 
 #endif

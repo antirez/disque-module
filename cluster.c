@@ -475,6 +475,11 @@ int clusterReplicateJob(RedisModuleCtx *ctx, job *j, int repl, int noreply) {
 
     if (repl <= 0) return 0;
 
+    /* Even if we'll not be able to add new nodes, we set the last try
+     * time here, so we'll not try again before some time in case the job
+     * replication gets delayed. */
+    j->added_node_time = mstime();
+
     /* Add the specified number of nodes to the list of receivers. */
     clusterShuffleReachableNodes();
     for (i = 0; i < ClusterReachableNodesCount; i++) {

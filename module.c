@@ -59,12 +59,15 @@ void disqueCron(RedisModuleCtx *ctx, void *data) {
     /* Evict idle queues without jobs. */
     evictIdleQueues(ctx);
 
-    /* Setup the timer for the next call. */
-    RedisModule_CreateTimer(ctx,1000,disqueCron,NULL);
-
     /* Check if other nodes have jobs about queues we have clients blocked
      * for. */
     clientsCronSendNeedJobs(ctx);
+
+    /* Add nodes to jobs that are slow to get replicated. */
+    handleDelayedJobReplication(ctx);
+
+    /* Setup the timer for the next call. */
+    RedisModule_CreateTimer(ctx,1000,disqueCron,NULL);
 }
 
 /* Return true if we are in "leaving" state. */
