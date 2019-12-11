@@ -1074,8 +1074,6 @@ Limitations
 * Disque is new code, not tested, and will require quite some time to reach production quality. It is likely very buggy and may contain wrong assumptions or tradeoffs.
 * As long as the software is non stable, the API may change in random ways without prior notification.
 * It is possible that Disque spends too much effort in approximating single delivery during failures. The **fast acknowledge** concept and command makes the user able to opt-out this efforts, but yet I may change the Disque implementation and internals in the future if I see the user base really not caring about multiple deliveries during partitions.
-* There is yet a lot of Redis dead code inside probably that could be removed.
-* Disque was designed a bit in *astronaut mode*, not triggered by an actual use case of mine, but more in response to what I was seeing people doing with Redis as a message queue and with other message queues. However I'm not an expert, if I succeeded to ship something useful for most users, this is kinda of an accomplishment. Otherwise it may just be that Disque is pretty useless.
 * As Redis, Disque is single threaded. While in Redis there are stronger reasons to do so, in Disque there is no manipulation of complex data structures, so maybe in the future it should be moved into a threaded server. We need to see what happens in real use cases in order to understand if it's worth it or not.
 * The number of jobs in a Disque process is limited to the amount of memory available. Again while this in Redis makes sense (IMHO), in Disque there are definitely simple ways in order to circumvent this limitation, like logging messages on disk when the server is out of memory and consuming back the messages when memory pressure is already acceptable. However in general, like in Redis, manipulating data structures in memory is a big advantage from the point of view of the implementation simplicity and the functionality we can provide to users.
 * Disque is completely not optimized for speed, was never profiled so far. I'm currently not aware of the fact it's slow, fast, or average, compared to other messaging solutions. For sure it is not going to have Redis-alike numbers because it does a lot more work at each command. For example when a job is added, it is serialized and transmitted to other `N` servers. There is a lot more message passing between nodes involved, and so forth. The good news is that being totally unoptimized, there is room for improvements.
@@ -1085,12 +1083,10 @@ Limitations
 FAQ
 ===
 
-Is Disque part of Redis?
+Is Disque as module part of Redis?
 ---
 
-No, it is a standalone project, however a big part of the Redis networking source code, nodes message bus, libraries, and the client protocol, were reused in this new project. In theory it was possible to extract the common code and release it as a framework to write distributed systems in C. However this is not a perfect solution as well, since the projects are expected to diverge more and more in the future, and to rely on a common fundation was hard. Moreover the initial effort to turn Redis into two different layers: an abstract server, networking stack and cluster bus, and the actual Redis implementation, was a huge effort, ways bigger than writing Disque itself.
-
-However while it is a separated project, conceptually Disque is related to Redis, since it tries to solve a Redis use case in a vertical, ad-hoc way.
+No, while it was *conceptually* part of the Redis 6 release, it is a separated project, handled directly and only by Salvatore Sanfilippo, and under a different license.
 
 Who created Disque?
 ---
@@ -1100,7 +1096,7 @@ Disque is a side project of Salvatore Sanfilippo, aka @antirez.
 There are chances for this project to be actively developed?
 ---
 
-Currently I consider this just a public alpha: If I see people happy to use it for the right reasons (i.e. it is better in some use cases compared to other message queues) I'll continue the development. Otherwise it was anyway cool to develop it, I had much fun, and I definitely learned new things.
+Yes, I'll continue the development of the Disque module in the future, and I hope to form a community of developers, so that we can do the work together. It is unlikely that this project will end being handled in a very personal way: I want to bootstrap it to a point it has a sufficient user base, and then make it a "community thing".
 
 What happens when a node runs out of memory?
 ---
@@ -1170,17 +1166,17 @@ DIStributed QUEue but is also a joke with "dis" as negation (like in *dis*order)
 Community: how to get help and how to help
 ===
 
-Get in touch with us in one of the following ways:
+Get in touch with us:
 
-1. Post on [Stack Overflow](http://stackoverflow.com) using the `disque` tag. This is the preferred method to get general help about Disque: other users will easily find previous questions so we can incrementally build a knowledge base.
-2. Join the `#disque` IRC channel at **irc.freenode.net**.
-3. Create an Issue or Pull request if your question or issue is about the Disque implementation itself.
+1. Create an issue in the Github repository.
+2. Ping `@antirez` on Twitter.
 
 Thanks
 ===
 
 I would like to say thank you to the following persons and companies.
 
-* Pivotal, for allowing me to work on Disque, most in my spare time, but sometimes during work hours. Moreover Pivotal agreed to leave the copyright of the code to me. This is very generous. Thanks Pivotal!
+* Redis labs, for accepting Disque as module as part of the Redis 6 roadmap.
+* Pivotal, for allowing me to work on the original version of Disque, four years ago, most in my spare time, but sometimes during work hours. Moreover Pivotal agreed to leave the copyright of the code to me. This is very generous. Thanks Pivotal!
 * Michel Martens and Damian Janowski for providing early feedback about Disque while the project was still private.
 * Everybody who is already writing client libraries, sending pull requests, creating issues in order to move this forward from alpha to something actually usable.
