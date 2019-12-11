@@ -207,7 +207,7 @@ void GOTJOBcallback(RedisModuleCtx *ctx, const char *sender_id, uint8_t msgtype,
 
 /* SETACK message: set the job as acknowledged and bring forward the
  * garbage collection of the job if needed, either replying with a GOTACK
- * message or by continuing the GC oruselves if we are in a better condition
+ * message or by continuing the GC ourself if we are in a better condition
  * than the sender. */
 void SETACKcallback(RedisModuleCtx *ctx, const char *sender_id, uint8_t msgtype, const unsigned char *payload, uint32_t len) {
     if (validateMessage(ctx,sender_id,payload,len,msgtype) == 0)
@@ -257,7 +257,7 @@ void SETACKcallback(RedisModuleCtx *ctx, const char *sender_id, uint8_t msgtype,
          *    because the sender has just a dummy ACK.
          * 2) Or, we prevented the sender from finishing the GC since
          *    we are not replying with GOTACK, and we need to take
-         *    responsability to evict the job in the cluster. */
+         *    responsibility to evict the job in the cluster. */
         tryJobGC(ctx,j);
     }
 }
@@ -472,7 +472,7 @@ void clusterBroadcastMessage(RedisModuleCtx *ctx, rax *nodes, int type, const un
  *
  * If there are already nodes that received the message, additional
  * 'repl' nodes will be added to the list (if possible), and the message
- * broadcasted again to all the nodes that may already have the message,
+ * broadcast again to all the nodes that may already have the message,
  * plus the new ones.
  *
  * However for nodes for which we already have the GOTJOB reply, we flag
@@ -707,7 +707,7 @@ void clusterBroadcastPause(RedisModuleCtx *ctx, const char *qname, size_t qnamel
 }
 
 /* Send a YOURJOBS message to the specified node, with a serialized copy of
- * the jobs referneced by the 'jobs' array and containing 'count' jobs. */
+ * the jobs referenced by the 'jobs' array and containing 'count' jobs. */
 void clusterSendYourJobs(RedisModuleCtx *ctx, const char *node, job **jobs, uint32_t count) {
     unsigned char buf[sizeof(clusterSerializedJobMessage)], *payload;
     clusterSerializedJobMessage *hdr = (clusterSerializedJobMessage*) buf;

@@ -259,7 +259,7 @@ raxNode *raxAddChild(raxNode *n, unsigned char c, raxNode **childptr, raxNode **
     size_t curlen = raxNodeCurrentLength(n);
     n->size++;
     size_t newlen = raxNodeCurrentLength(n);
-    n->size--; /* For now restore the orignal size. We'll update it only on
+    n->size--; /* For now restore the original size. We'll update it only on
                   success at the end. */
 
     /* Alloc the new child we will link to 'n'. */
