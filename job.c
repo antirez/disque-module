@@ -30,7 +30,7 @@
  *
  * The TTL is a big endian 16 bit unsigned number ceiled to 2^16-1
  * if greater than that, and is only used in order to expire ACKs
- * when the job is no longer avaialbe. It represents the TTL of the
+ * when the job is no longer available. It represents the TTL of the
  * original job in *minutes*, not seconds, and is encoded in as a
  * 4 digits hexadecimal number.
  *
@@ -100,7 +100,7 @@ void generateJobID(char *id, int ttl, int retry) {
  * as hex big endian number in the Job ID. The function is only used for this
  * but is more generic. 'p' points to the first digit for 'count' hex digits.
  * The number is assumed to be stored in big endian format. For each byte
- * the first hex char is the most significative. If invalid digits are found
+ * the first hex char is the most significant. If invalid digits are found
  * considered to be zero, however errno is set to EINVAL if this happens. */
 uint64_t hexToInt(const char *p, size_t count) {
     uint64_t value = 0;
@@ -133,7 +133,7 @@ uint64_t hexToInt(const char *p, size_t count) {
  * However comparing nodes just by node ID means that a given node is always
  * greater than the other. So before comparing the node IDs, we mix the IDs
  * with the pseudorandom part of the Job ID, using the XOR function. This way
- * the comparision depends on the job. */
+ * the comparison depends on the job. */
 int compareNodeIDsByJob(const char *nodea, const char *nodeb, job *j) {
     int i;
     char ida[REDISMODULE_NODE_ID_LEN], idb[REDISMODULE_NODE_ID_LEN];
@@ -210,7 +210,7 @@ job *createJob(const char *id, int state, int ttl, int retry) {
     j->nodes_delivered = raxNew();
     j->nodes_confirmed = NULL; /* Only created later on-demand. */
     j->awakeme = 0; /* Not yet registered in awakeme skiplist. */
-    /* Number of NACKs and additiona deliveries start at zero and
+    /* Number of NACKs and additional deliveries start at zero and
      * are incremented as QUEUED messages are received or sent. */
     j->num_nacks = 0;
     j->num_deliv = 0;
@@ -293,7 +293,7 @@ int unregisterJob(RedisModuleCtx *ctx, job *j) {
 }
 
 /* Return the job state as a C string pointer. This is mainly useful for
- * reporting / debugign tasks. */
+ * reporting / debugging tasks. */
 char *jobStateToString(int state) {
     char *states[] = {"wait-repl","active","queued","acked"};
     if (state < 0 || state > JOB_STATE_ACKED) return "unknown";
@@ -333,7 +333,7 @@ int jobStateFromString(char *state) {
 /* Ask the system to update the time the job will be called again as an
  * argument of awakeJob() in order to handle delayed tasks for this job.
  * If 'at' is zero, the function computes the next time we should check
- * the job status based on the next quee time (qtime), expire time, garbage
+ * the job status based on the next queue time (qtime), expire time, garbage
  * collection if it's an ACK, and so forth.
  *
  * Otherwise if 'at' is non-zero, it's up to the caller to set the time
@@ -382,7 +382,7 @@ void updateJobRequeueTime(job *j, mstime_t qtime) {
     updateJobAwakeTime(j,0);
 }
 
-/* Job comparision inside the awakeme skiplist: by awakeme time. If it is the
+/* Job comparison inside the awakeme skiplist: by awakeme time. If it is the
  * same jobs are compared by ctime. If the same again, by job ID. */
 int skiplistCompareJobsToAwake(const void *a, const void *b) {
     const job *ja = a, *jb = b;
@@ -531,7 +531,7 @@ void processJobs(RedisModuleCtx *ctx, void *clientData) {
         current = next;
     }
 
-    /* Try to block between 1 and 100 millseconds depending on how near
+    /* Try to block between 1 and 100 milliseconds depending on how near
      * in time is the next async event to process. Note that because of
      * received commands or change in state jobs state may be modified so
      * we set a max time of 100 milliseconds to wakeup anyway. */
@@ -609,8 +609,8 @@ char *serializeSdsString(char *p, sds s) {
  * job: uint32_t little endian len + actual bytes of the job body.
  *
  * nodes: List of nodes that may have a copy of the message. uint32_t
- * little endian with the count of N node names followig. Then N
- * fixed lenght node names of CLUSTER_NODE_NAMELEN characters each.
+ * little endian with the count of N node names following. Then N
+ * fixed length node names of CLUSTER_NODE_NAMELEN characters each.
  *
  * The message is concatenated to the existing sds string 'jobs'.
  * Just use sdsempty() as first argument to get a single job serialized.
@@ -691,7 +691,7 @@ sds serializeJob(sds jobs, job *j, int sertype) {
     }
     raxStop(&ri);
 
-    /* Make sure we wrote exactly the intented number of bytes. */
+    /* Make sure we wrote exactly the intended number of bytes. */
     RedisModule_Assert(len == (size_t)(p-msg));
     return jobs;
 }
@@ -1413,7 +1413,7 @@ int showCommand(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
 
 /* DELJOB jobid_1 jobid_2 ... jobid_N
  *
- * Evict (and possibly remove from queue) all the jobs in memeory
+ * Evict (and possibly remove from queue) all the jobs in memory
  * matching the specified job IDs. Jobs are evicted whatever their state
  * is, since this command is mostly used inside the AOF or for debugging
  * purposes.

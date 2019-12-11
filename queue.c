@@ -17,7 +17,7 @@ void signalQueueAsReady(RedisModuleCtx *ctx, queue *q);
 
 /* ------------------------ Low level queue functions ----------------------- */
 
-/* Job comparision inside a skiplist: by ctime, if ctime is the same by
+/* Job comparison inside a skiplist: by ctime, if ctime is the same by
  * job ID. */
 int skiplistCompareJobsInQueue(const void *a, const void *b) {
     const job *ja = a, *jb = b;
@@ -331,10 +331,10 @@ void cleanupClientBlockedForJobs(RedisModuleCtx *ctx, RedisModuleBlockedClient *
     raxRemove(BlockedClients,(unsigned char*)&bc,sizeof(bc),NULL);
 }
 
-/* Handle blocking if GETJOB fonud no jobs in the specified queues.
+/* Handle blocking if GETJOB found no jobs in the specified queues.
  *
  * 1) We set q->clients to the list of clients blocking for this queue
- *    (the value fo the list items is a BlockedClientData structure).
+ *    (the value of the list items is a BlockedClientData structure).
  * 2) We set BlockedClients as well, as a dictionary of queues a client
  *    is blocked for. So we can resolve queues from clients. This is useful
  *    in order to clear the blocked client list when the client
@@ -481,7 +481,7 @@ unsigned long getQueueValidResponders(queue *q) {
  *
  * Calling this function may result into NEEDJOBS messages send to specific
  * nodes that are remembered as potential sources for messages in this queue,
- * or more rarely into NEEDJOBS messages to be broadcasted cluster-wide in
+ * or more rarely into NEEDJOBS messages to be broadcast cluster-wide in
  * order to discover new nodes that may be source of messages.
  *
  * This function in called in two different contests:
@@ -494,7 +494,7 @@ unsigned long getQueueValidResponders(queue *q) {
  * for case 3 instead type is set to NEEDJOBS_REACHED_ZERO, and in this
  * case the node may send a NEEDJOBS message to the set of known sources
  * for this queue, regardless of needjobs_adhoc_time value (that is, without
- * trying to trottle the requests, since there is an active flow of messages
+ * trying to throttle the requests, since there is an active flow of messages
  * between this node and source nodes).
  */
 
@@ -573,7 +573,7 @@ void needJobsForQueue(RedisModuleCtx *ctx, queue *q, int type) {
     }
 }
 
-/* needJobsForQueue() wrapper taking a queue name insteead of a queue
+/* needJobsForQueue() wrapper taking a queue name instead of a queue
  * structure. The queue will be created automatically if non existing. */
 void needJobsForQueueName(RedisModuleCtx *ctx, RedisModuleString *qname, int type) {
     size_t namelen;
@@ -951,7 +951,7 @@ int dequeueCommand(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
  *
  * Normally jobs are returned from the oldest to the newest (according to the
  * job creation time field), however if "count" is negative , jobs are
- * returend from newset to oldest instead.
+ * returned from newset to oldest instead.
  *
  * Each job is returned as a two elements array with the Job ID and body. */
 int qpeekCommand(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
@@ -998,8 +998,8 @@ int qpeekCommand(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
  * Postpone the job requeue time in the future so that we'll wait the retry
  * time before enqueueing again.
  *
- * Also, as a side effect of callign this command, a WORKING message gets
- * broadcasted to all the other nodes that have a copy according to our local
+ * Also, as a side effect of calling this command, a WORKING message gets
+ * broadcast to all the other nodes that have a copy according to our local
  * job information.
  *
  * Return how much time the worker likely have before the next requeue event

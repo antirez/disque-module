@@ -29,7 +29,7 @@ void acknowledgeJob(job *job) {
 
 /* ------------------------- Garbage collection ----------------------------- */
 
-/* Return the next milliseconds unix time where the next GC attept for this
+/* Return the next milliseconds unix time where the next GC attempt for this
  * job should be performed. */
 mstime_t getNextGCRetryTime(job *job) {
     mstime_t period = JOB_GC_RETRY_MIN_PERIOD * (1 << job->gc_retry);
@@ -108,8 +108,8 @@ void tryJobGC(RedisModuleCtx *ctx, job *job) {
 /* This function is called by cluster.c every time we receive a GOTACK message
  * about a job we know. */
 void gotAckReceived(RedisModuleCtx *ctx, const char *sender, job *job, int known) {
-    /* A dummy ACK is an acknowledged job that we created just becakse a client
-     * send us ACKJOB about a job we were not aware. */
+    /* A dummy ACK is an acknowledged job that we created just because a client
+     * sent us ACKJOB about a job we were not aware. */
     int dummy_ack = raxSize(job->nodes_delivered) == 0;
 
     RedisModule_Log(ctx,"verbose",
@@ -248,12 +248,12 @@ int ackjobCommand(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
  *
  * Performs a fast acknowledge of the specified jobs.
  * A fast acknowledge does not really attempt to make sure all the nodes
- * that may have a copy recive the ack. The job is just discarded and
+ * that may have a copy receive the ack. The job is just discarded and
  * a best-effort DELJOB is sent to all the nodes that may have a copy
  * without caring if they receive or not the message.
  *
  * This command will more likely result in duplicated messages delivery
- * during network partiitons, but uses less messages compared to ACKJOB.
+ * during network partitions, but uses less messages compared to ACKJOB.
  *
  * If a job is not known, a cluster-wide DELJOB is broadcasted.
  *
