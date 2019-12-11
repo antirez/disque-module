@@ -2,9 +2,7 @@
  *
  * Copyright (c) 2014-2019, Salvatore Sanfilippo <antirez at gmail dot com>
  * All rights reserved. This code is under the AGPL license, check the
- * LICENSE file for more info.
- *
- */
+ * LICENSE file for more info. */
 
 #include "disque.h"
 

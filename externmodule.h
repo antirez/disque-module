@@ -1,3 +1,8 @@
+/* This file implements the extern prototypes of the function pointers for
+ * the Redis module system, in order to have the module APIs defined in
+ * different C files. It should go away once we have a better redismodule.h
+ * implementation. */
+
 #include <stdint.h>
 
 typedef uint64_t RedisModuleTimerID;

@@ -27,8 +27,8 @@ What is the state of the Disque module compared to Disque 1.0 RC1 in the origina
 * The module lacks the implementation of any persistence layer yet.
 * No graceful removal of nodes (leaving node state): this flag is yet to be implemented.
 * There are many bugs and it may crash. It started working just a few days ago.
-* A few commands may be missing. Notably there is no `INFO` for Disque yet.
-* The license is different.
+* A few commands may be missing. Notably there is no `HELLO` and `INFO` for Disque yet. Note that both also conflict with Redis command names, so they'll renamed to `DISQUE HELLO` and `DISQUE INFO`.
+* The license is different, the Disque module is AGPL while the original Disque project as a Redis fork was BSD.
 
 All the missing features will be addressed in the next weeks in order to provide a module that is ready for beta testing, and later for production usage.
 
@@ -336,7 +336,8 @@ To play with Disque please do the following:
 
 1. Compile Disque. Just type `make`.
 2. Run a Redis Cluster with three nodes or more (all masters), with the Disque module loaded.
-3. Join the cluster with `redis-cli --cluster` as usually.
+3. Make sure that your Redis Cluster is configured with the following directives: AOF enabled, RDB preamble in the AOF enabled.
+4. Join the cluster with `redis-cli --cluster create ...` as usually.
 
 Your cluster should now be ready. You can try to add a job and fetch it back
 in order to test if everything is working:

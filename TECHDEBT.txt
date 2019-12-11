@@ -23,3 +23,5 @@ Technical debts in Disque as a module
 * Implement the Disque original test in the module version: this should be
   easy if the test, in order to run, requires to clone Redis inside the
   Disque tree.
+
+* Implement `DISQUE HELLO` and `DISQUE INFO`.
