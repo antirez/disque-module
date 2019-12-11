@@ -1,3 +1,4 @@
 *.xo
 *.o
 *.so
+test/redis
