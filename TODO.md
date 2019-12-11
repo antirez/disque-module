@@ -25,3 +25,5 @@ Technical debts in Disque as a module
   Disque tree.
 
 * Implement `DISQUE HELLO` and `DISQUE INFO`.
+
+* Implement QSCAN and JSCAN, but using the radix tree and thus returning no cursor: we'll just use the last returned item as cursor.
