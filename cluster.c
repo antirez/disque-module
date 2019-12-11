@@ -264,7 +264,7 @@ void SETACKcallback(RedisModuleCtx *ctx, const char *sender_id, uint8_t msgtype,
     }
 }
 
-/* GOTACK message. Acknowledge that we received the SETACK message. */
+/* GOTACK message. Acknowledge for the SETACK message. */
 void GOTACKcallback(RedisModuleCtx *ctx, const char *sender_id, uint8_t msgtype, const unsigned char *payload, uint32_t len) {
     if (validateMessage(ctx,sender_id,payload,len,msgtype) == 0)
         return;

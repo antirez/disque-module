@@ -91,9 +91,16 @@ void tryJobGC(RedisModuleCtx *ctx, job *job) {
         raxIterator ri;
         raxStart(&ri,job->nodes_delivered);
         raxSeek(&ri,"^",NULL,0);
-        clusterSendSetAck(ctx,(char*)ri.key,job);
+        while(raxNext(&ri)) {
+            RedisModule_Log(ctx,"verbose",
+                "GC: sending SETACK to %.*s",
+                REDISMODULE_NODE_ID_LEN, ri.key);
+            clusterSendSetAck(ctx,(char*)ri.key,job);
+        }
         raxStop(&ri);
     } else {
+        RedisModule_Log(ctx,"verbose",
+            "GC: sending SETACK to the whole cluster");
         clusterSendSetAck(ctx,NULL,job);
     }
 }
