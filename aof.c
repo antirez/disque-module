@@ -4,7 +4,7 @@
 
 #include "disque.h"
 
-/* AOF implemention is work in progress. */
+/* AOF implementation is work in progress. */
 
 void AOFLoadJob(job *job) { UNUSED(job); }
 void AOFDelJob(job *job) { UNUSED(job); }
@@ -44,7 +44,7 @@ void AOFDelJob(job *job) {
     decrRefCount(jobid);
 }
 
-/* Emit a DELJOB command, since ths is how we handle acknowledged jobs from
+/* Emit a DELJOB command, since this is how we handle acknowledged jobs from
  * the point of view of AOF. We are not interested in loading back acknowledged
  * jobs, nor we include them on AOF rewrites, since ACKs garbage collection
  * works anyway if nodes forget about ACKs and dropping ACKs is not a safety
