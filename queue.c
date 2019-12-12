@@ -796,7 +796,7 @@ int getjobCommand(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
             int retval = RedisModule_StringToLongLong(argv[j+1],&count);
             if (retval != REDISMODULE_OK || count <= 0) {
                 RedisModule_ReplyWithError(ctx,
-                    "COUNT must be a number greater than zero");
+                    "ERR COUNT must be a number greater than zero");
                 return REDISMODULE_OK;
             }
             j++;
@@ -805,13 +805,14 @@ int getjobCommand(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
             numqueues = argc - j - 1;
             break; /* Don't process options after this. */
         } else {
-            return RedisModule_ReplyWithError(ctx,"Unrecognized option given");
+            return RedisModule_ReplyWithError(ctx,
+                "ERR Unrecognized option given");
         }
     }
 
     /* FROM is mandatory. */
     if (queues == NULL || numqueues == 0) {
-        return RedisModule_ReplyWithError(ctx,"FROM is mandatory");
+        return RedisModule_ReplyWithError(ctx,"ERR FROM is mandatory");
     }
 
     /* First: try to avoid blocking if there is at least one job in at
@@ -867,7 +868,7 @@ int getjobCommand(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
      * to import jobs here. Just return a -LEAVING error. */
     if (myselfLeaving())
         return RedisModule_ReplyWithError(ctx,
-            "-LEAVING this node is leaving the cluster. "
+            "LEAVING this node is leaving the cluster. "
             "Try another one please.");
 
     /* If we reached this point, we need to block. */
@@ -961,7 +962,7 @@ int qpeekCommand(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
     long long count, returned = 0;
 
     if (RedisModule_StringToLongLong(argv[2],&count) == REDISMODULE_ERR)
-        return RedisModule_ReplyWithError(ctx,"Invalid count");
+        return RedisModule_ReplyWithError(ctx,"ERR Invalid count");
 
     if (count < 0) {
         count = -count;
@@ -1020,7 +1021,7 @@ int workingCommand(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
     job *job = lookupJob(jobid);
     if (job == NULL)
         return RedisModule_ReplyWithError(ctx,
-            "-NOJOB Job not known in the context of this node.\r\n");
+            "NOJOB Job not known in the context of this node.\r\n");
 
     /* Don't allow to postpone jobs that have less than 50% of time to live
      * left, in order to prevent a worker from monopolizing a job for all its
@@ -1029,7 +1030,7 @@ int workingCommand(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
     mstime_t elapsed = mstime() - (job->ctime/1000000);
     if (ttl > 0 && elapsed > ttl/2)
         return RedisModule_ReplyWithError(ctx,
-            "-TOOLATE Half of job TTL already elapsed, "
+            "TOOLATE Half of job TTL already elapsed, "
             "you are no longer allowed to postpone the "
             "next delivery.\r\n");
 
@@ -1133,7 +1134,7 @@ int pauseCommand(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
         } else if (!strcasecmp(opt,"bcast")) {
             bcast = 1;
         } else {
-            return RedisModule_ReplyWithError(ctx,"syntax error");
+            return RedisModule_ReplyWithError(ctx,"ERR syntax error");
         }
     }
 

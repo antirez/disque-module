@@ -183,7 +183,7 @@ int validateJobID(const char *id, size_t len) {
 int validateJobIdOrReply(RedisModuleCtx *ctx, const char *id, size_t len) {
     int retval = validateJobID(id,len);
     if (retval == C_ERR && ctx)
-        RedisModule_ReplyWithError(ctx,"-BADID Invalid Job ID format");
+        RedisModule_ReplyWithError(ctx,"BADID Invalid Job ID format");
     return retval;
 }
 
@@ -276,7 +276,7 @@ int unregisterJob(RedisModuleCtx *ctx, job *j) {
             RedisModuleCtx *tsc = RedisModule_GetThreadSafeContext(bc);
             j->bc = NULL;
             RedisModule_ReplyWithError(tsc,
-                "-NOREPL job removed (expired?) before the requested "
+                "NOREPL job removed (expired?) before the requested "
                 "replication level was achieved");
             /* Change job state otherwise unblockClientWaitingJobRepl() will
              * try to remove the job itself. */
@@ -1027,13 +1027,13 @@ int getTimeoutFromObjectOrReply(RedisModuleCtx *ctx, RedisModuleString *object, 
 
     if (RedisModule_StringToLongLong(object,&tval) == REDISMODULE_ERR) {
         RedisModule_ReplyWithError(ctx,
-            "timeout is not an integer or out of range");
+            "ERR timeout is not an integer or out of range");
         return REDISMODULE_ERR;
     }
 
     if (tval < 0) {
         RedisModule_ReplyWithError(ctx,
-            "timeout is negative");
+            "ERR timeout is negative");
         return REDISMODULE_ERR;
     }
 
@@ -1095,41 +1095,41 @@ int addjobCommand(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
             if (retval != REDISMODULE_OK || replicate <= 0 || replicate > 65535)
             {
                 return RedisModule_ReplyWithError(ctx,
-                    "REPLICATE must be between 1 and 65535");
+                    "ERR REPLICATE must be between 1 and 65535");
             }
             j++;
         } else if (!strcasecmp(opt,"ttl") && !lastarg) {
             retval = RedisModule_StringToLongLong(argv[j+1],&ttl);
             if (retval != REDISMODULE_OK || ttl <= 0) {
                 return RedisModule_ReplyWithError(ctx,
-                    "TTL must be a number > 0");
+                    "ERR TTL must be a number > 0");
             }
             j++;
         } else if (!strcasecmp(opt,"retry") && !lastarg) {
             retval = RedisModule_StringToLongLong(argv[j+1],&retry);
             if (retval != REDISMODULE_OK || retry < 0) {
                 return RedisModule_ReplyWithError(ctx,
-                    "RETRY time must be a non negative number");
+                    "ERR RETRY time must be a non negative number");
             }
             j++;
         } else if (!strcasecmp(opt,"delay") && !lastarg) {
             retval = RedisModule_StringToLongLong(argv[j+1],&delay);
             if (retval != REDISMODULE_OK || delay < 0) {
                 return RedisModule_ReplyWithError(ctx,
-                    "DELAY time must be a non negative number");
+                    "ERR DELAY time must be a non negative number");
             }
             j++;
         } else if (!strcasecmp(opt,"maxlen") && !lastarg) {
             retval = RedisModule_StringToLongLong(argv[j+1],&maxlen);
             if (retval != REDISMODULE_OK || maxlen <= 0) {
                 return RedisModule_ReplyWithError(ctx,
-                    "MAXLEN must be a positive number");
+                    "ERR MAXLEN must be a positive number");
             }
             j++;
         } else if (!strcasecmp(opt,"async")) {
             async = 1;
         } else {
-            return RedisModule_ReplyWithError(ctx,"Syntax error");
+            return RedisModule_ReplyWithError(ctx,"ERR Syntax error");
         }
     }
 
@@ -1142,14 +1142,14 @@ int addjobCommand(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
      * is not acknowledged? */
     if (replicate > 1 && retry == 0) {
        return RedisModule_ReplyWithError(ctx,
-            "With RETRY set to 0 please explicitly set  "
+            "ERR With RETRY set to 0 please explicitly set  "
             "REPLICATE to 1 (at-most-once delivery)");
     }
 
     /* DELAY greater or equal to TTL is silly. */
     if (delay >= ttl) {
         return RedisModule_ReplyWithError(ctx,
-            "The specified DELAY is greater than TTL. Job refused "
+            "ERR The specified DELAY is greater than TTL. Job refused "
             "since would never be delivered");
     }
 
@@ -1169,13 +1169,13 @@ int addjobCommand(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
             additional_nodes-1 == ClusterReachableNodesCount)
         {
             return RedisModule_ReplyWithError(ctx,
-                       "-NOREPL Not enough reachable nodes "
+                       "NOREPL Not enough reachable nodes "
                        "for the requested replication level, since I'm unable "
                        "to hold a copy of the message (OOM or leaving the "
                        "cluster)");
         } else {
             return RedisModule_ReplyWithError(ctx,
-                        "-NOREPL Not enough reachable nodes "
+                        "NOREPL Not enough reachable nodes "
                         "for the requested replication level");
         }
     }
@@ -1190,14 +1190,14 @@ int addjobCommand(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
      * within the requested limits. */
     if (maxlen && q && queueLength(q) >= (unsigned long) maxlen) {
         return RedisModule_ReplyWithError(ctx,
-                "-MAXLEN Queue is already longer than "
+                "MAXLEN Queue is already longer than "
                 "the specified MAXLEN count");
     }
 
     /* If the queue is paused in input, refuse the job. */
     if (q && q->flags & QUEUE_FLAG_PAUSED_IN) {
         return RedisModule_ReplyWithError(ctx,
-                "-PAUSED Queue paused in input, try later");
+                "PAUSED Queue paused in input, try later");
     }
 
     /* Are we going to discard the local copy before to return to the caller?
@@ -1251,7 +1251,7 @@ int addjobCommand(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
         RedisModule_Log(ctx,"warning","ID already existing in ADDJOB command!");
         freeJob(job);
         return RedisModule_ReplyWithError(ctx,
-            "Internal error creating the job, check server logs");
+            "ERR Internal error creating the job, check server logs");
     }
 
     /* For replicated messages where ASYNC option was not asked, block
