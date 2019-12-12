@@ -13,18 +13,32 @@
 #define DISQUE_INFO_TYPE_LONGLONG       4
 #define DISQUE_INFO_TYPE_ULONGLONG      5
 
+/* INFO getter function for Rax size. */
+void disqueInfoGetRaxSize(void *aux, void *valueptr, size_t *lenptr) {
+    UNUSED(lenptr);
+    unsigned long long val = raxSize(*((rax**)aux));
+    memcpy(valueptr,&val,sizeof(val));
+}
+
 struct disqueInfoProperty {
     char *name;
     int type;
     void *valueptr;
-    void (*getvalue)(void *valeptr, size_t *lenptr);
+    void (*getvalue)(void *aux, void *valueptr, size_t *lenptr);
+    void *aux;
 } DisqueInfoPropertiesTable[] = {
+    /* cluster.* */
     {"cluster.nodes.reachable",
         DISQUE_INFO_TYPE_INT,
-        &ClusterReachableNodesCount,
-        NULL},
-    /* Terminator. */
-    {NULL,0,NULL,NULL}
+        &ClusterReachableNodesCount,NULL,NULL},
+
+    /* jobs.* */
+    {"jobs.registered",
+        DISQUE_INFO_TYPE_ULONGLONG,
+        NULL,disqueInfoGetRaxSize,&Jobs},
+
+    /* Final terminator. */
+    {NULL,0,NULL,NULL,NULL}
 };
 
 /* DISQUE INFO [option name] */
@@ -50,23 +64,35 @@ int disqueInfo(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
         /* Fetch the info. */
         struct disqueInfoProperty *dp = DisqueInfoPropertiesTable+j;
         int intval;
+        unsigned long long ulonglongval;
 
         if (dp->type == DISQUE_INFO_TYPE_INT) {
             if (dp->getvalue) {
-                dp->getvalue(&intval,NULL);
+                dp->getvalue(dp->aux,&intval,NULL);
             } else {
                 intval = *(int*)(dp->valueptr);
             }
+        } else if (dp->type == DISQUE_INFO_TYPE_ULONGLONG) {
+            if (dp->getvalue) {
+                dp->getvalue(dp->aux,&ulonglongval,NULL);
+            } else {
+                ulonglongval = *(unsigned long long*)(dp->valueptr);
+            }
         }
+
 
         /* Either accumulate it as a string or emit it if there is
          * a match. */
         if (stringout) {
             if (dp->type == DISQUE_INFO_TYPE_INT)
                 output = sdscatprintf(output,"%s:%d\n",dp->name,intval);
+            else if (dp->type == DISQUE_INFO_TYPE_ULONGLONG)
+                output = sdscatprintf(output,"%s:%llu\n",dp->name,ulonglongval);
         } else if (!strcasecmp(wanted,dp->name)) {
             if (dp->type == DISQUE_INFO_TYPE_INT)
                 return RedisModule_ReplyWithLongLong(ctx,intval);
+            else if (dp->type == DISQUE_INFO_TYPE_ULONGLONG)
+                return RedisModule_ReplyWithLongLong(ctx,ulonglongval);
         }
     }
 

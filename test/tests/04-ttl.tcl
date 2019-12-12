@@ -26,22 +26,22 @@ test "Jobs TTL is honoured" {
 }
 
 test "Jobs mass expire test" {
-    R 0 debug flushall
-    assert {[DI 0 registered_jobs] == 0}
+    R 0 disque flushall
+    assert {[R 0 DISQUE INFO jobs.registered] == 0}
     set count 1000
     for {set j 0} {$j < $count} {incr j} {
         R 0 addjob myqueue job-$j 10000 ttl 5
     }
-    assert {[DI 0 registered_jobs] == $count}
+    assert {[R 0 DISQUE INFO jobs.registered] == $count}
     wait_for_condition 1000 50 {
-        [DI 0 registered_jobs] == 0
+        [R 0 DISQUE INFO jobs.registered] == 0
     } else {
         fail "Not every job expired after some time"
     }
 }
 
 test "Queues are expired when system is OOM" {
-    R 0 debug flushall
+    R 0 disque flushall
 
     # Create empty queues.
     for {set j 0} {$j < 1000} {incr j} {
