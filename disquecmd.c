@@ -37,6 +37,11 @@ struct disqueInfoProperty {
         DISQUE_INFO_TYPE_ULONGLONG,
         NULL,disqueInfoGetRaxSize,&Jobs},
 
+    /* queues.* */
+    {"queues.registered",
+        DISQUE_INFO_TYPE_ULONGLONG,
+        NULL,disqueInfoGetRaxSize,&Queues},
+
     /* Final terminator. */
     {NULL,0,NULL,NULL,NULL}
 };

@@ -243,8 +243,8 @@ int evictIdleQueues(RedisModuleCtx *ctx) {
      * continue from there instead of using a random walk. */
     raxIterator ri;
     raxStart(&ri,Queues);
-    raxSeek(&ri,"^",NULL,0);
     while (raxSize(Queues) != 0) {
+        raxSeek(&ri,"^",NULL,0);
         raxRandomWalk(&ri,0);
         queue *q = ri.data;
 

@@ -49,15 +49,15 @@ test "Queues are expired when system is OOM" {
         R 0 addjob $qname myjob 5000 replicate 1 retry 0
         R 0 GETJOB FROM $qname
     }
-    assert {[DI 0 registered_queues] == 1000}
+    assert {[R 0 DISQUE INFO queues.registered] == 1000}
 
     # Create an OOM condition.
     R 0 CONFIG SET maxmemory 1
 
     wait_for_condition 1000 50 {
-        [DI 0 registered_queues] == 0
+        [R 0 DISQUE INFO queues.registered] == 0
     } else {
-        fail "Not all queues are expired. Still in memory: [DI 0 registered_queues]"
+        fail "Not all queues are expired. Still in memory: [R 0 DISQUE INFO queues.registered]"
     }
 
     # Fix the configuration back to default.
