@@ -76,6 +76,25 @@ test "Sync ADDJOB fails if not enough nodes are available" {
     assert_match {NOREPL*} $job_id
 }
 
+# After killing nodes, wait for the system to adjust the number of
+# reachable nodes after failure detection.
+proc wait_less_nodes_then {count} {
+    wait_for_condition 50 1000 {
+        [R 0 DISQUE INFO cluster.nodes.reachable]+1 < $count
+    } else {
+        fail "Too many nodes still reachable"
+    }
+}
+
+# Wait that all the nodes are back visible again
+proc wait_full_cluster {} {
+    wait_for_condition 50 1000 {
+        [R 0 DISQUE INFO cluster.nodes.reachable]+1 == $::instances_count
+    } else {
+        fail "Too many nodes still reachable"
+    }
+}
+
 test "Sync ADDJOB fails if not enough nodes are reachable" {
     # We kill three instances and send ADDJOB ASAP before the nodes
     # are marked as not reachable.
@@ -83,11 +102,13 @@ test "Sync ADDJOB fails if not enough nodes are reachable" {
     kill_instance redis 2
     kill_instance redis 3
     set impossible_repl [expr {$::instances_count-3+1}]
+    wait_less_nodes_then $impossible_repl
     catch {R 0 addjob myqueue myjob 5000 replicate $impossible_repl} job_id
     assert_match {NOREPL*} $job_id
     restart_instance redis 1
     restart_instance redis 2
     restart_instance redis 3
+    wait_full_cluster
 }
 
 # For the probabilistic nature of this test, better to execute it a few times.
@@ -103,11 +124,13 @@ for {set j 1} {$j <= 3} {incr j} {
         # For the replication to succeeed, instance 0 will have to try other
         # nodes before the timeout.
         set max_possible_repl [expr {$::instances_count-3}]
+        wait_less_nodes_then [expr {$max_possible_repl+1}]
         catch {R 0 addjob myqueue myjob 5000 replicate $max_possible_repl} job_id
         assert_match {D-*} $job_id
         restart_instance redis 1
         restart_instance redis 2
         restart_instance redis 3
+        wait_full_cluster
     }
     after 1000; # Make likely that restarted nodes fail status is cleared.
 }
@@ -116,11 +139,13 @@ test "Replicating job expires before reaching the replication level" {
     # Put one instance down.
     kill_instance redis 1
     set impossible_repl $::instances_count
+    wait_less_nodes_then $impossible_repl
     catch {
         R 0 addjob myqueue myjob 15000 replicate $impossible_repl ttl 1
     } job_id
     assert_match {NOREPL*} $job_id
     restart_instance redis 1
+    wait_full_cluster
 }
 
 test "Sync REPLJOB messages are retried against old nodes" {

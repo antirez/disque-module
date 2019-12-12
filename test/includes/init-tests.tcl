@@ -29,7 +29,7 @@ test "Cluster nodes hard reset" {
     foreach_redis_id id {
         R $id cluster reset hard
 #        R $id cluster leaving no
-        R $id config set cluster-node-timeout 3000
+        R $id config set cluster-node-timeout 1000
         R $id config rewrite
     }
 }
