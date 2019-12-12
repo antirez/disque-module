@@ -127,6 +127,8 @@ void NEEDJOBScallback(RedisModuleCtx *ctx, const char *sender_id, uint8_t msgtyp
 void PAUSEcallback(RedisModuleCtx *ctx, const char *sender_id, uint8_t msgtype, const unsigned char *payload, uint32_t len);
 void DELJOBcallback(RedisModuleCtx *ctx, const char *sender_id, uint8_t msgtype, const unsigned char *payload, uint32_t len);
 
+int disqueCommand(RedisModuleCtx *ctx, RedisModuleString **argv, int argc);
+
 #define UNIT_SECONDS 0
 #define UNIT_MILLISECONDS 1
 int getTimeoutFromObjectOrReply(RedisModuleCtx *ctx, RedisModuleString *object, mstime_t *timeout, int unit);

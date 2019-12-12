@@ -22,7 +22,7 @@ all: disque.so
 
 disque.xo: ../redismodule.h
 
-MODULE_OBJECTS=ack.xo job.xo queue.xo sds.xo skiplist.xo cluster.xo utils.xo module.xo aof.xo rax.xo adlist.xo
+MODULE_OBJECTS=ack.xo job.xo queue.xo sds.xo skiplist.xo cluster.xo utils.xo module.xo aof.xo rax.xo adlist.xo disquecmd.xo
 
 disque.so: $(MODULE_OBJECTS)
 	$(LD) -o $@ $(MODULE_OBJECTS) $(SHOBJ_LDFLAGS) $(LIBS) -lc

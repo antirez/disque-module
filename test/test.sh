@@ -9,6 +9,7 @@ fi
 rm -rf redis/tests/cluster/tests/*
 
 # Replace them with the Disque tests
+cp run.tcl redis/tests/cluster/
 cp tests/*.tcl redis/tests/cluster/tests/
 cp -a includes redis/tests/cluster/tests/
 

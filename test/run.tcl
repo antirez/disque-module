@@ -4,8 +4,9 @@
 
 cd tests/cluster
 source cluster.tcl
-source ../instances.tcl
+source ../instances.tcl ; # This include will enter the "tmp" dir.
 source ../../support/cluster.tcl ; # Redis Cluster client.
+source ../tests/includes/disque.tcl ; # Additional Disque requirements
 
 set ::instances_count 20 ; # How many instances we use at max.
 set ::tlsdir "../../tls"
@@ -15,7 +16,7 @@ proc main {} {
     spawn_instance redis $::redis_base_port $::instances_count {
         "cluster-enabled yes"
         "appendonly yes"
-        "loadmodule ../../../disque.so"
+        "loadmodule ../../../../../../disque.so"
     }
     run_tests
     cleanup
