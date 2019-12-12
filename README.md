@@ -1,5 +1,7 @@
 [![Build Status](https://travis-ci.org/antirez/disque.svg)](https://travis-ci.org/antirez/disque)
 
+**IMPORTANT please read:** This project for now does not accept pull requests, but feel free to open issues and discuss about bugs and features. PRs will be accepted later when a minimum level of stability is reached and I've the CLAs ready.
+
 Disque, an in-memory, distributed job queue
 ===
 
