@@ -26,7 +26,7 @@ foreach repl {1 2} {
         # The job should be somewhere even if it is not into the node
         # we added it to.
         set job [list id $id]
-        wait_for_condition {
+        wait_for_condition 1000 50 {
             [llength [get_job_instances $job {queued active}]] >= $repl 
         } else {
             fail "Job was not externally replicated"
@@ -64,7 +64,7 @@ test "ADDJOB, asynchronous replication to multiple nodes" {
     # Asynchronous replication does not guarantees the specified number
     # of copies, but here in the test environment no node should fail
     # unless we kill one, so we expect 3 copies.
-    wait_for_condition {
+    wait_for_condition 1000 50 {
         [count_job_copies $job] >= 3
     } else {
         fail "Not enough nodes reached via asynchronous replication"

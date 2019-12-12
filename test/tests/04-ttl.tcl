@@ -12,7 +12,7 @@ test "Jobs TTL is honoured" {
     assert {[count_job_copies $job {active queued}] >= 3}
 
     # After some time the job is deleted from the cluster.
-    wait_for_condition {
+    wait_for_condition 1000 50 {
         [count_job_copies $job {active queued}] == 0
     } else {
         fail "Job with TTL is still active"
@@ -33,7 +33,7 @@ test "Jobs mass expire test" {
         R 0 addjob myqueue job-$j 10000 ttl 5
     }
     assert {[DI 0 registered_jobs] == $count}
-    wait_for_condition {
+    wait_for_condition 1000 50 {
         [DI 0 registered_jobs] == 0
     } else {
         fail "Not every job expired after some time"
@@ -54,7 +54,7 @@ test "Queues are expired when system is OOM" {
     # Create an OOM condition.
     R 0 CONFIG SET maxmemory 1
 
-    wait_for_condition {
+    wait_for_condition 1000 50 {
         [DI 0 registered_queues] == 0
     } else {
         fail "Not all queues are expired. Still in memory: [DI 0 registered_queues]"

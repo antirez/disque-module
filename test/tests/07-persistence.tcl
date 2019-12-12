@@ -5,7 +5,7 @@ test "Enable AOF" {
     foreach_redis_id j {
         R $j CONFIG SET appendonly yes
         R $j CONFIG REWRITE
-        wait_for_condition {
+        wait_for_condition 1000 50 {
             [DI $j aof_state] eq {on}
         } else {
             fail "Can't enable AOF for instance #$j"
@@ -34,7 +34,7 @@ for {set i 0} {$i < 5} {incr i} {
         }
 
         # Wait for the job to be re-queued after restart.
-        wait_for_condition {
+        wait_for_condition 1000 50 {
             [count_job_copies $job queued] > 0
         } else {
             fail "Job not requeued after some time"

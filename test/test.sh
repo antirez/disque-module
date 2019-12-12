@@ -14,4 +14,4 @@ cp tests/*.tcl redis/tests/cluster/tests/
 cp -a includes redis/tests/cluster/tests/
 
 # Run the test
-(cd redis; make; ./runtest-cluster)
+(cd redis; make; ./runtest-cluster $*)

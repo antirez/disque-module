@@ -11,7 +11,7 @@ test "LEAVING state can be set" {
 }
 
 test "LEAVING state progagates to other nodes" {
-    wait_for_condition {
+    wait_for_condition 1000 50 {
         [count_cluster_nodes_with_flag 1 leaving] > 0
     } else {
         fail "Leaving state of node 0 does not propagate to node 1"

@@ -28,7 +28,7 @@ test "If the job is consumed, but not acknowledged, it gets requeued" {
     assert {[lindex $myjob 1] eq $id}
     assert {[lindex $myjob 2] eq "myjob"}
 
-    wait_for_condition {
+    wait_for_condition 1000 50 {
         [count_job_copies $job queued] > 0
     } else {
         fail "Job not requeued after some time"
@@ -54,7 +54,7 @@ test "If the job is not consumed, but queueing node unreachable, is requeued" {
     assert {$id ne {}}
     assert {[count_job_copies $job queued] == 1}
     kill_instance redis 0
-    wait_for_condition {
+    wait_for_condition 1000 50 {
         [count_job_copies $job queued] > 0
     } else {
         fail "Job not requeued after some time"
@@ -81,7 +81,7 @@ test "Best effort first and/or major-node-enqueues rule works" {
     # Now we expect it to be queued into a single node. There is no guarantee
     # that this will happen, but in the test environent it should happen
     # most of the times.
-    wait_for_condition {
+    wait_for_condition 1000 50 {
         [count_job_copies $job queued] == 1
     } else {
         fail "Job not queued a single time as expected. NON CRITICAL: note that there is no guarantee of success, this test just stresses the best-effort attempt at delivering a single time. Ignore the failure of this test if you are not a developer."
@@ -111,7 +111,7 @@ for {set j 0} {$j < 10} {incr j} {
 
         # Wait for the job to be re-queued, in case we killed the instance
         # where the job was previously queued.
-        wait_for_condition {
+        wait_for_condition 1000 50 {
             [count_job_copies $job queued] > 0
         } else {
             fail "Job not requeued after some time"

@@ -87,7 +87,7 @@ int disqueCommand(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
     if (!strcasecmp(opt,"info")) {
         return disqueInfo(ctx,argv,argc);
     } else {
-        RedisModule_ReplyWithError(ctx,"Unknown DISQUE subcommand");
+        RedisModule_ReplyWithError(ctx,"ERR Unknown DISQUE subcommand");
     }
     return REDISMODULE_OK;
 }

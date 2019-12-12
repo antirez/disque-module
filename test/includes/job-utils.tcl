@@ -8,7 +8,7 @@ proc count_job_copies {job {states {queued active}}} {
         if {[instance_is_killed redis $j]} continue
         set node_id [dict get [get_myself $j] id]
         if {[lsearch -exact $delivered $node_id] == -1} continue
-        set job [D $j show $job_id]
+        set job [R $j show $job_id]
         if {$job ne {} &&
             [lsearch -exact $states [dict get $job state]] != -1} {
              incr copies
@@ -26,7 +26,7 @@ proc get_job_instances {job {states {queued}}} {
     set res {}
     foreach_redis_id j {
         if {[instance_is_killed redis $j]} continue
-        set job [D $j show $job_id]
+        set job [R $j show $job_id]
         if {$job eq {} && $states eq {}} {
             lappend res $j
         } elseif {$job ne {} &&

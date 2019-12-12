@@ -32,7 +32,7 @@ test "GET WITHCOUNTERS can retrieve additional deliveries count" {
     assert {$id ne {}}
     set myjob [lindex [R 0 getjob from $qname] 0]
 
-    wait_for_condition {
+    wait_for_condition 1000 50 {
         [count_job_copies $job queued] >= 1
     } else {
         fail "Job never rescheduled while it should"

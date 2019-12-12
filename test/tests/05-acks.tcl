@@ -13,7 +13,7 @@ test "Acks are propagated in the cluster" {
     set job [R 0 show $id]
     assert {[count_job_copies $job {active queued}] >= 5}
     R 0 ackjob $id
-    wait_for_condition {
+    wait_for_condition 1000 50 {
         [count_job_copies $job {active queued}] == 0
     } else {
         fail "ACK garbage collection failed"
@@ -39,7 +39,7 @@ test "Acks are evicted only if all the job owners can be reached" {
 
     # Make sure the ack is not deleted
     after 2000
-    wait_for_condition {
+    wait_for_condition 1000 50 {
         [count_job_copies $job {acked}] >= 4
     } else {
         fail "Not enough copies of the acked job foudn"
@@ -49,7 +49,7 @@ test "Acks are evicted only if all the job owners can be reached" {
     restart_instance redis 0
 
     # Make sure the ack is collected at this point
-    wait_for_condition {
+    wait_for_condition 1000 50 {
         [count_job_copies $job {acked}] == 0
     } else {
         fail "Ack not GCed after some time"
@@ -69,7 +69,7 @@ test "It is possible to acknowledge jobs to nodes not knowing it" {
     R $no_copy_instance ackjob $id
 
     # Make sure the ack is collected at this point
-    wait_for_condition {
+    wait_for_condition 1000 50 {
         [count_job_copies $job {acked}] == 0
     } else {
         fail "Ack not GCed after some time"
@@ -96,7 +96,7 @@ test "Acknowledge to non owner, while some owner is down" {
     restart_instance redis [lindex $owners 0]
 
     # Make sure the ack is collected at this point
-    wait_for_condition {
+    wait_for_condition 1000 50 {
         [count_job_copies $job {acked}] == 0
     } else {
         fail "Ack not GCed after some time"
@@ -127,7 +127,7 @@ test "Acknowledge to non owner, while all the owners are down" {
     }
 
     # Make sure the ack is collected at this point
-    wait_for_condition {
+    wait_for_condition 1000 50 {
         [count_job_copies $job {acked}] == 0
     } else {
         fail "Ack not GCed after some time"
@@ -139,7 +139,7 @@ test "Fast ack to owner node" {
     set job [R 0 show $id]
     assert {[count_job_copies $job {active queued}] >= 5}
     R 0 fastack $id
-    wait_for_condition {
+    wait_for_condition 1000 50 {
         [count_job_copies $job {active queued}] == 0
     } else {
         fail "ACK garbage collection failed"
@@ -160,7 +160,7 @@ test "Fast ack to non owner node" {
 
     # DELJOB should be broadcasted cluster-wide causign the job to be
     # collected, given that the net is well connected right now.
-    wait_for_condition {
+    wait_for_condition 1000 50 {
         [count_job_copies $job {acked}] == 0
     } else {
         fail "Ack not GCed after some time"
