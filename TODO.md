@@ -19,10 +19,9 @@ Technical debts in Disque as a module
 
 * Implement AOF and AOF rewriting, or an alternative file-based and threaded
   persistence layer in a spool directory.
+    - Handle the persistence in DISQUE FLUSHALL.
 
-* Implement the Disque original test in the module version: this should be
-  easy if the test, in order to run, requires to clone Redis inside the
-  Disque tree.
+* Implement the Disque original test in the module version: work in progress.
 
 * Implement `DISQUE HELLO` and `DISQUE INFO`.
 

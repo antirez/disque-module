@@ -113,6 +113,7 @@ void clusterSendGotAck(RedisModuleCtx *ctx, const char *receiver, char *jobid, i
 int myselfLeaving(void);
 mstime_t getNextGCRetryTime(job *job);
 int getMemoryWarningLevel(RedisModuleCtx *ctx);
+void flushAllJobsAndQueues(RedisModuleCtx *ctx);
 
 void REPLJOBcallback(RedisModuleCtx *ctx, const char *sender_id, uint8_t msgtype, const unsigned char *payload, uint32_t len);
 void YOURJOBScallback(RedisModuleCtx *ctx, const char *sender_id, uint8_t msgtype, const unsigned char *payload, uint32_t len);

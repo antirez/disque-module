@@ -10,3 +10,6 @@ proc count_cluster_nodes_with_flag {id flag} {
     return $count
 }
 
+proc randomQueue {} {
+    return "queue-[randstring 40 40 alpha]"
+}

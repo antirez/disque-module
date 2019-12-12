@@ -29,6 +29,7 @@ struct disqueInfoProperty {
 
 /* DISQUE INFO [option name] */
 int disqueInfo(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
+    if (argc != 2 & argc != 3) return RedisModule_WrongArity(ctx);
     int stringout = 0;
     sds output = NULL;
     const char *wanted = NULL;
@@ -82,10 +83,14 @@ int disqueInfo(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
 
 /* The DISQUE command implements all the disque specific features. */
 int disqueCommand(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
-    if (argc < 2 || argc > 3) return RedisModule_WrongArity(ctx);
+    if (argc < 2) return RedisModule_WrongArity(ctx);
     const char *opt = RedisModule_StringPtrLen(argv[1],NULL);
+
     if (!strcasecmp(opt,"info")) {
         return disqueInfo(ctx,argv,argc);
+    } else if (!strcasecmp(opt,"flushall")) {
+        flushAllJobsAndQueues(ctx);
+        RedisModule_ReplyWithSimpleString(ctx,"OK");
     } else {
         RedisModule_ReplyWithError(ctx,"ERR Unknown DISQUE subcommand");
     }

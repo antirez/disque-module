@@ -748,6 +748,48 @@ char *queueGetPausedStateString(uint32_t qflags) {
     }
 }
 
+/* This function completely deletes all the data in Disque: jobs and queues.
+ * It has no effects in the persistence, so it's up to the caller to
+ * replicate the command to flush all the data if needed. */
+void flushAllJobsAndQueues(RedisModuleCtx *ctx) {
+    /* Free all the jobs. as a side effect this should also unblock
+     * all the clients blocked in jobs that are being replicated. */
+    raxIterator ri;
+    raxStart(&ri,Jobs);
+    raxSeek(&ri,"^",NULL,0);
+    while(raxNext(&ri)) {
+        job *job = ri.data;
+        unregisterJob(ctx,job);
+        freeJob(job);
+        raxSeek(&ri,">",ri.key,ri.key_len);
+    }
+    raxStop(&ri);
+
+    /* Unblock all the clients blocked on queues: there will be no
+     * queues soon. */
+    raxStart(&ri,BlockedClients);
+    raxSeek(&ri,"^",NULL,0);
+    while(raxNext(&ri)) {
+        RedisModuleBlockedClient *bc;
+        memcpy(&bc,ri.key,sizeof(bc));
+        RedisModuleCtx *tsc = RedisModule_GetThreadSafeContext(bc);
+        RedisModule_ReplyWithNull(tsc);
+        RedisModule_FreeThreadSafeContext(tsc);
+        cleanupClientBlockedForJobs(ctx,bc);
+        raxSeek(&ri,">",ri.key,ri.key_len);
+    }
+    raxStop(&ri);
+
+    /* Destroy all the queues. */
+    raxStart(&ri,Queues);
+    raxSeek(&ri,"^",NULL,0);
+    while(raxNext(&ri)) {
+        destroyQueue((char*)ri.key,ri.key_len);
+        raxSeek(&ri,">",ri.key,ri.key_len);
+    }
+    raxStop(&ri);
+}
+
 /* ------------------------- Queue related commands ------------------------- */
 
 /* QLEN <qname> -- Return the number of jobs queued. */
