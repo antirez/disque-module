@@ -228,7 +228,8 @@ int RedisModule_OnLoad(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) 
     if (!RedisConfigIsValid) {
         RedisModule_Log(ctx,"warning",
             "Disque detected that Redis is misconfigured, make sure that: "
-            "AOF is on, and AOF RDB preamble is also enabled.");
+            "Cluster mode is enabled, AOF is on, and the AOF RDB preamble is "
+            "enabled.");
         return REDISMODULE_ERR;
     }
 
