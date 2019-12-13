@@ -26,6 +26,10 @@ RedisModuleType *DisqueModuleType;  /* The type we declare, even if we don't
                                        have any visible key in the Redis key
                                        space, in order to have the RDB aux
                                        data hooks during the AOF rewrite. */
+int RedisConfigIsValid;             /* True if in the last check the Redis
+                                       AOF configuration was found to be
+                                       valid: AOF is on, RDB preamble for AOF
+                                       is active. */
 
 void initDisque(void) {
     Jobs = raxNew();
@@ -38,6 +42,40 @@ void initDisque(void) {
     ClusterReachableNodes = NULL;
     RedisModule_GetRandomBytes(JobIDSeed,sizeof(JobIDSeed));
     AwakeList = skiplistCreate(skiplistCompareJobsToAwake);
+    RedisConfigIsValid = 0;
+}
+
+/* Check if Redis is correctly configured for Disque and sets the
+ * RedisConfigIsValid global variable accordingly. */
+void disqueVerifyRedisConfigValidity(RedisModuleCtx *ctx) {
+    int errors = 0;
+
+    /* AOF and RDB AOF preamble must be on. */
+    for (int j = 0; j < 2; j++) {
+        RedisModuleCallReply *reply, *yesnoreply;
+        const char *str;
+        size_t strlen;
+
+        reply = RedisModule_Call(ctx,"CONFIG","cc","GET",
+            j == 0 ? "appendonly" : "aof-use-rdb-preamble");
+        if (RedisModule_CallReplyType(reply) == REDISMODULE_REPLY_ARRAY) {
+            yesnoreply = RedisModule_CallReplyArrayElement(reply,1);
+            if (RedisModule_CallReplyType(yesnoreply) ==
+                REDISMODULE_REPLY_STRING)
+            {
+                str = RedisModule_CallReplyStringPtr(yesnoreply,&strlen);
+                if (strlen != 3 || memcmp(str,"yes",3) != 0) errors++;
+            } else {
+                errors++;
+            }
+        } else {
+            errors++;
+        }
+        RedisModule_FreeCallReply(reply);
+    }
+
+    /* We are fine if no errors were detected. */
+    RedisConfigIsValid = (errors == 0);
 }
 
 /* Return 0 if the instance has no memory issues.
@@ -69,6 +107,10 @@ void disqueCron(RedisModuleCtx *ctx, void *data) {
 
     /* Setup the timer for the next call. */
     RedisModule_CreateTimer(ctx,1000,disqueCron,NULL);
+
+    /* Check the configuration validity periodically since the user may
+     * reconfigure Redis on the fly via "CONFIG SET". */
+    disqueVerifyRedisConfigValidity(ctx);
 }
 
 /* Return true if we are in "leaving" state. */
@@ -173,9 +215,18 @@ int RedisModule_OnLoad(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) 
         .aux_save_triggers = REDISMODULE_AUX_AFTER_RDB
     };
     DisqueModuleType = RedisModule_CreateDataType(ctx,"disque-az",1,&tm);
-    if (DisqueModuleType) {
+    if (DisqueModuleType == NULL) {
         RedisModule_Log(ctx,"warning",
             "Disque failed to register the module data type");
+        return REDISMODULE_ERR;
+    }
+
+    /* Check if the Redis config is ok. */
+    disqueVerifyRedisConfigValidity(ctx);
+    if (!RedisConfigIsValid) {
+        RedisModule_Log(ctx,"warning",
+            "Disque detected that Redis is misconfigured, make sure that: "
+            "AOF is on, and AOF RDB preamble is also enabled.");
         return REDISMODULE_ERR;
     }
 
