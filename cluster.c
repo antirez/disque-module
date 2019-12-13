@@ -160,7 +160,7 @@ void REPLJOBcallback(RedisModuleCtx *ctx, const char *sender_id, uint8_t msgtype
              * that may have a copy. */
             updateJobNodes(j);
         } else {
-            AOFLoadJob(j);
+            AOFLoadJob(ctx,j);
         }
         /* Reply with a GOTJOB message, even if we already did in the past.
          * The node receiving ADDJOB may try multiple times, and our
@@ -235,7 +235,7 @@ void SETACKcallback(RedisModuleCtx *ctx, const char *sender_id, uint8_t msgtype,
             }
         }
         /* ACK it if not already acked. */
-        acknowledgeJob(j);
+        acknowledgeJob(ctx,j);
     }
 
     /* Reply according to the job exact state. */

@@ -259,7 +259,7 @@ int unregisterJob(RedisModuleCtx *ctx, job *j) {
     /* Emit a DELJOB command for all the job states but WAITREPL (no
      * ADDJOB emitted yer), and ACKED (DELJOB already emitted). */
     if (j->state >= JOB_STATE_ACTIVE && j->state != JOB_STATE_ACKED)
-        AOFDelJob(j);
+        AOFDelJob(ctx,j);
 
     /* Remove from awake skip list. */
     if (j->awakeme) RedisModule_Assert(skiplistDelete(AwakeList,j));
@@ -974,7 +974,7 @@ int jobReplicationAchieved(RedisModuleCtx *ctx, job *j) {
     else
         updateJobAwakeTime(j,0); /* Queue with delay. */
 
-    AOFLoadJob(j);
+    AOFLoadJob(ctx,j);
     return C_OK;
 }
 
@@ -1287,7 +1287,7 @@ int addjobCommand(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
             if (!discard_local_copy) updateJobAwakeTime(job,0);
         }
         addReplyJobID(ctx,job);
-        if (!extrepl) AOFLoadJob(job);
+        if (!extrepl) AOFLoadJob(ctx,job);
     }
 
     /* If the replication factor is > 1, send REPLJOB messages to REPLICATE-1

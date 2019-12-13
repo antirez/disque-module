@@ -6,9 +6,88 @@
 
 /* AOF implementation is work in progress. */
 
-void AOFLoadJob(job *job) { UNUSED(job); }
-void AOFDelJob(job *job) { UNUSED(job); }
-void AOFAckJob(job *job) { UNUSED(job); }
+void AOFLoadJob(RedisModuleCtx *ctx, job *job) { UNUSED(job); UNUSED(ctx); }
+void AOFDelJob(RedisModuleCtx *ctx, job *job) { UNUSED(job); UNUSED(ctx); }
+void AOFAckJob(RedisModuleCtx *ctx, job *job) { UNUSED(job); UNUSED(ctx); }
+
+#define DISQUE_RDB_OPCODE_EOF 1
+#define DISQUE_RDB_OPCODE_MOREJOBS 2
+
+/* Serialized all the jobs in the RDB file: since we force the user to
+ * configure the Redis RDB preamble with AOF, this is our de-facto
+ * AOF rewriting function. */
+void DisqueRDBAuxSave(RedisModuleIO *rdb, int when) {
+    UNUSED(when);
+    raxIterator ri;
+    raxStart(&ri,Jobs);
+    raxSeek(&ri,"^",NULL,0);
+    while(raxNext(&ri)) {
+        job *job = ri.data;
+        /* We need to persist only jobs that are in a state interesting
+         * to load back. Jobs that are yet replicating or that are acknowledged
+         * are not persisted. */
+        RedisModule_SaveUnsigned(rdb,DISQUE_RDB_OPCODE_MOREJOBS);
+        if (job->state != JOB_STATE_ACTIVE &&
+            job->state != JOB_STATE_QUEUED) continue;
+        sds serialized = serializeJob(sdsempty(),job,SER_STORAGE);
+        RedisModule_SaveStringBuffer(rdb,serialized,sdslen(serialized));
+    }
+    raxStop(&ri);
+    RedisModule_SaveUnsigned(rdb,DISQUE_RDB_OPCODE_EOF);
+}
+
+/* Load the jobs back from the RDB AOF preamble. */
+int DisqueRDBAuxLoad(RedisModuleIO *rdb, int encver, int when) {
+    UNUSED(when);
+    UNUSED(encver);
+
+    RedisModuleCtx *ctx = RedisModule_GetContextFromIO(rdb);
+    time_t now = time(NULL);
+    while(1) {
+        /* Load the opcode, and stop if it end-of-jobs. */
+        int opcode = RedisModule_LoadUnsigned(rdb);
+        if (RedisModule_IsIOError(rdb)) return REDISMODULE_ERR;
+        if (opcode == DISQUE_RDB_OPCODE_EOF) break;
+
+        /* Load the serialized job. */
+        RedisModuleString *serialized = RedisModule_LoadString(rdb);
+        if (RedisModule_IsIOError(rdb)) return REDISMODULE_ERR;
+
+        /* Decode it. */
+        size_t len;
+        const char *buf = RedisModule_StringPtrLen(serialized,&len);
+        job *job = deserializeJob(ctx,
+            (unsigned char*)buf,len,NULL,SER_STORAGE);
+        if (job == NULL) {
+            RedisModule_Log(ctx,"warning",
+                "Deserialization error while reading job from RDB");
+            return REDISMODULE_ERR;
+        }
+        RedisModule_FreeString(ctx,serialized);
+
+        /* We'll enqueue the job only if Disque was restarted with the
+         * controlled restart option. */
+        int enqueue_job = 0;
+        if (job->state == JOB_STATE_QUEUED) {
+            if (0 /* XXX: FIXME: server.aof_enqueue_jobs_once */)
+                enqueue_job = 1;
+            job->state = JOB_STATE_ACTIVE;
+        }
+
+	/* Check if the job expired before registering it. */
+	if (job->etime <= now) {
+	    freeJob(job);
+	    continue;
+	}
+
+	/* Register the job, and if needed enqueue it: we put jobs back into
+	 * queues only if enqueue-jobs-at-next-restart option is set, that is,
+	 * when a controlled restart happens. */
+	if (registerJob(job) == C_OK && enqueue_job)
+	    enqueueJob(ctx,job,0);
+    }
+    return REDISMODULE_OK;
+}
 
 #if 0
 

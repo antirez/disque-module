@@ -22,6 +22,10 @@ char **ClusterReachableNodes;       /* IDs of reachable nodes. */
 rax *ClusterLeavingNodes;           /* Nodes that are leaving the cluster. */
 unsigned char JobIDSeed[20];        /* Seed to generate random IDs. */
 skiplist *AwakeList;                /* Job processing skiplist. */
+RedisModuleType *DisqueModuleType;  /* The type we declare, even if we don't
+                                       have any visible key in the Redis key
+                                       space, in order to have the RDB aux
+                                       data hooks during the AOF rewrite. */
 
 void initDisque(void) {
     Jobs = raxNew();
@@ -159,6 +163,23 @@ int RedisModule_OnLoad(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) 
     RedisModule_RegisterClusterMessageReceiver(ctx,DISQUE_MSG_PAUSE,PAUSEcallback);
     RedisModule_RegisterClusterMessageReceiver(ctx,DISQUE_MSG_DELJOB,DELJOBcallback);
 
+    /* Register the Disque type. */
+    RedisModule_SetModuleOptions(ctx, REDISMODULE_OPTIONS_HANDLE_IO_ERRORS);
+
+    RedisModuleTypeMethods tm = {
+        .version = REDISMODULE_TYPE_METHOD_VERSION,
+        .aux_load = DisqueRDBAuxLoad,
+        .aux_save = DisqueRDBAuxSave,
+        .aux_save_triggers = REDISMODULE_AUX_AFTER_RDB
+    };
+    DisqueModuleType = RedisModule_CreateDataType(ctx,"disque-az",1,&tm);
+    if (DisqueModuleType) {
+        RedisModule_Log(ctx,"warning",
+            "Disque failed to register the module data type");
+        return REDISMODULE_ERR;
+    }
+
+    /* Start Disque. */
     initDisque();
     disqueCron(ctx,NULL);
     processJobs(ctx,NULL);

@@ -134,4 +134,7 @@ int disqueCommand(RedisModuleCtx *ctx, RedisModuleString **argv, int argc);
 #define UNIT_MILLISECONDS 1
 int getTimeoutFromObjectOrReply(RedisModuleCtx *ctx, RedisModuleString *object, mstime_t *timeout, int unit);
 
+void DisqueRDBAuxSave(RedisModuleIO *rdb, int when);
+int DisqueRDBAuxLoad(RedisModuleIO *rdb, int encver, int when);
+
 #endif

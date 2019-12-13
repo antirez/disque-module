@@ -11,7 +11,7 @@
 
 /* Change job state as acknowledged. If it is already in that state, the
  * function does nothing. */
-void acknowledgeJob(job *job) {
+void acknowledgeJob(RedisModuleCtx *ctx, job *job) {
     if (job->state == JOB_STATE_ACKED) return;
 
     dequeueJob(job);
@@ -24,7 +24,7 @@ void acknowledgeJob(job *job) {
         job->nodes_confirmed = NULL;
     }
     updateJobAwakeTime(job,0); /* Make sure we'll schedule a job GC. */
-    AOFAckJob(job); /* Change job state in AOF. */
+    AOFAckJob(ctx,job); /* Change job state in AOF. */
 }
 
 /* ------------------------- Garbage collection ----------------------------- */
@@ -235,7 +235,7 @@ int ackjobCommand(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
         /* Case 2: Job exists and is not acknowledged. Change state. */
         else if (job && job->state != JOB_STATE_ACKED) {
             dequeueJob(job); /* Safe to call if job is not queued. */
-            acknowledgeJob(job);
+            acknowledgeJob(ctx,job);
             known++;
         }
         /* Anyway... start a GC attempt on the acked job. */
