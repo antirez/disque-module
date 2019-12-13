@@ -49,15 +49,17 @@ void initDisque(void) {
  * RedisConfigIsValid global variable accordingly. */
 void disqueVerifyRedisConfigValidity(RedisModuleCtx *ctx) {
     int errors = 0;
+    const char *configs[3] = {"appendonly",
+                              "aof-use-rdb-preamble",
+                              "cluster-enabled"};
 
     /* AOF and RDB AOF preamble must be on. */
-    for (int j = 0; j < 2; j++) {
+    for (int j = 0; j < 3; j++) {
         RedisModuleCallReply *reply, *yesnoreply;
         const char *str;
         size_t strlen;
 
-        reply = RedisModule_Call(ctx,"CONFIG","cc","GET",
-            j == 0 ? "appendonly" : "aof-use-rdb-preamble");
+        reply = RedisModule_Call(ctx,"CONFIG","cc","GET",configs[j]);
         if (RedisModule_CallReplyType(reply) == REDISMODULE_REPLY_ARRAY) {
             yesnoreply = RedisModule_CallReplyArrayElement(reply,1);
             if (RedisModule_CallReplyType(yesnoreply) ==

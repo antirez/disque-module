@@ -4,8 +4,6 @@ Technical debts in Disque as a module
 (this list is in no way complete, because this version of Disque as a
  module is an alpha at best)
 
-* Stop the module immediately when loaded in non-cluster mode.
-
 * Implement "leaving":
     - Set the "leaving" flag if the global vars leaving is true.
     - Process the leaving flag when a message is received: if set make sure to
@@ -20,7 +18,7 @@ Technical debts in Disque as a module
 * Implement AOF and AOF rewriting, or an alternative file-based and threaded
   persistence layer in a spool directory.
     - Handle the persistence in DISQUE FLUSHALL.
-    - Fail loading, or later executing ADDJOB, if the RDB preamble is not
+    - Fail executing ADDJOB, if the RDB preamble is not
       active in the AOF configuration. Check periodically and update
       a global state.
 
