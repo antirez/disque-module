@@ -239,7 +239,7 @@ int evictIdleQueues(RedisModuleCtx *ctx) {
     if (getMemoryWarningLevel(ctx) > 0) max_idle_time /= 30;
     if (getMemoryWarningLevel(ctx) > 1) max_idle_time = 2;
 
-    /* XXX: It is better to remember the last queue name scanned and
+    /* XXX: TODO: It is better to remember the last queue name scanned and
      * continue from there instead of using a random walk. */
     raxIterator ri;
     raxStart(&ri,Queues);
