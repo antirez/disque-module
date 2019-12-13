@@ -20,6 +20,9 @@ Technical debts in Disque as a module
 * Implement AOF and AOF rewriting, or an alternative file-based and threaded
   persistence layer in a spool directory.
     - Handle the persistence in DISQUE FLUSHALL.
+    - Fail loading, or later executing ADDJOB, if the RDB preamble is not
+      active in the AOF configuration. Check periodically and update
+      a global state.
 
 * Implement the Disque original test in the module version: work in progress.
 
