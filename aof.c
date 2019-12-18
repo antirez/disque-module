@@ -9,6 +9,7 @@
 void AOFLoadJob(RedisModuleCtx *ctx, job *job) { UNUSED(job); UNUSED(ctx); }
 void AOFDelJob(RedisModuleCtx *ctx, job *job) { UNUSED(job); UNUSED(ctx); }
 void AOFAckJob(RedisModuleCtx *ctx, job *job) { UNUSED(job); UNUSED(ctx); }
+void AOFDequeueJob(RedisModuleCtx *ctx, job *job) { UNUSED(job); UNUSED(ctx); }
 
 #define DISQUE_RDB_OPCODE_EOF 1
 #define DISQUE_RDB_OPCODE_MOREJOBS 2

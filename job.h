@@ -160,6 +160,7 @@ int skiplistCompareJobsToAwake(const void *a, const void *b);
 void AOFLoadJob(RedisModuleCtx *ctx, job *j);
 void AOFDelJob(RedisModuleCtx *ctx, job *j);
 void AOFAckJob(RedisModuleCtx *ctx, job *j);
+void AOFDequeueJob(RedisModuleCtx *ctx, job *job);
 int addjobCommand(RedisModuleCtx *ctx, RedisModuleString **argv, int argc);
 int showCommand(RedisModuleCtx *ctx, RedisModuleString **argv, int argc);
 int deljobCommand(RedisModuleCtx *ctx, RedisModuleString **argv, int argc);

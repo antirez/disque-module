@@ -13,6 +13,12 @@ Technical debts in Disque as a module
     - From time to time remove the "leaving" nodes from the radix tree if the
       last leaving report is older than a few minutes.
 
+* When loading jobs, by default re-queue them if they are in queued state, and
+  don't do it only if a specific "safety" option is enabled to ensure
+  semantics of at-most-once jobs even with weak AOF fsync policies.
+  Now we generate DEQUEUE commands in the AOF for at-most-once jobs that
+  are removed from the queue.
+
 * Fix blocking in same queue mulitple times. Grep for blockForJobs().
 
 * Implement AOF and AOF rewriting, or an alternative file-based and threaded

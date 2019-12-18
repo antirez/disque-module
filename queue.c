@@ -186,7 +186,7 @@ int dequeueJob(job *job) {
  *
  * If 'qlen' is not NULL, the residual length of the queue is stored
  * at *qlen. */
-job *queueFetchJob(queue *q, unsigned long *qlen) {
+job *queueFetchJob(RedisModuleCtx *ctx, queue *q, unsigned long *qlen) {
     if (skiplistLength(q->sl) == 0) return NULL;
     job *j = skiplistPopHead(q->sl);
     j->state = JOB_STATE_ACTIVE;
@@ -194,13 +194,15 @@ job *queueFetchJob(queue *q, unsigned long *qlen) {
     q->atime = time(NULL);
     q->jobs_out++;
     if (qlen) *qlen = skiplistLength(q->sl);
+    /* Jobs that have a retry set to 0 (at most once delivery semantics)
+     * need to change state in the AOF as well: this way after a restart
+     * we don't risk putting it into the queue again.
+     *
+     * Note that however when the AOF fsync policy is not strong enough,
+     * after a crash the job may end in the queue again, so Disque offers
+     * an option to load jobs in "active" state instead of "queued" state. */
+    if (j->retry == 0) AOFDequeueJob(ctx,j);
     return j;
-}
-
-/* Like queueFetchJob() but take the queue name as input. */
-job *queueNameFetchJob(sds qname, unsigned long *qlen) {
-    queue *q = lookupQueue(qname,sdslen(qname));
-    return q ? queueFetchJob(q,qlen) : NULL;
 }
 
 /* Return the length of the queue, or zero if NULL is passed here. */
@@ -375,7 +377,7 @@ void handleClientsBlockedOnQueue(RedisModuleCtx *ctx, queue *q) {
         unsigned long qlen;
         listNode *ln = listFirst(q->clients);
         RedisModuleBlockedClient *bc = ln->value;
-        job *j = queueFetchJob(q,&qlen);
+        job *j = queueFetchJob(ctx,q,&qlen);
 
         if (!j) return; /* There are no longer jobs in this queue. */
         if (qlen == 0) needJobsForQueue(ctx,q,NEEDJOBS_REACHED_ZERO);
@@ -673,7 +675,7 @@ void receiveNeedJobs(RedisModuleCtx *ctx, const char *node, const char *qname, s
 
     job *jobs[NEEDJOBS_MAX_REQUEST];
     for (j = 0; j < replyjobs; j++) {
-        jobs[j] = queueFetchJob(q,NULL);
+        jobs[j] = queueFetchJob(ctx,q,NULL);
         RedisModule_Assert(jobs[j] != NULL);
     }
     clusterSendYourJobs(ctx,node,jobs,replyjobs);
@@ -870,7 +872,7 @@ int getjobCommand(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
             job *job = NULL;
 
             if (q && !(q->flags & QUEUE_FLAG_PAUSED_OUT))
-                job = queueFetchJob(q,&qlen);
+                job = queueFetchJob(ctx,q,&qlen);
 
             if (!job) {
                 if (!q)
