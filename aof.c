@@ -113,7 +113,7 @@ int DisqueRDBAuxLoad(RedisModuleIO *rdb, int encver, int when) {
 int loadjobCommand(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
     if (argc != 2) return RedisModule_WrongArity(ctx);
 
-    if (RedisModule_IsAOFClient(RedisModule_GetClientId(ctx))) {
+    if (!RedisModule_IsAOFClient(RedisModule_GetClientId(ctx))) {
         return RedisModule_ReplyWithError(ctx,
             "ERR LOADJOB is a special command only "
             "processed from AOF");
@@ -125,8 +125,8 @@ int loadjobCommand(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
     job *job = deserializeJob(ctx,
         (unsigned char*)serialized,serlen,NULL,SER_STORAGE);
     if (job == NULL) {
-        return RedisModule_ReplyWithError(ctx,"ERR warning: "
-            "deserialization error while reading job from AOF");
+        RedisModule_Log(ctx,"warning",
+            "LOADJOB deserialization error while reading job from AOF");
     }
 
     /* We'll enqueue the job if the state is queued, unless Disque was
