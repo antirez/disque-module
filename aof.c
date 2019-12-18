@@ -90,6 +90,55 @@ int DisqueRDBAuxLoad(RedisModuleIO *rdb, int encver, int when) {
     return REDISMODULE_OK;
 }
 
+/* The LOADJOB command is emitted in the AOF to load serialized jobs at
+ * restart, and is only processed while loading AOFs. Clients calling this
+ * command get an error.
+ *
+ * This is basically the same as DisqueRDBAuxLoad(), but getting the
+ * serialized job from the command. Unfortunately refactoring the two
+ * in a single command would raise the complexity instead of lowering it. */
+int loadjobCommand(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
+    if (argc != 2) return RedisModule_WrongArity(ctx);
+
+    if (RedisModule_IsAOFClient(RedisModule_GetClientId(ctx))) {
+        return RedisModule_ReplyWithError(ctx,
+            "ERR LOADJOB is a special command only "
+            "processed from AOF");
+    }
+
+    size_t serlen;
+    const char *serialized = RedisModule_StringPtrLen(argv[1],&serlen);
+
+    job *job = deserializeJob(ctx,
+        (unsigned char*)serialized,serlen,NULL,SER_STORAGE);
+    if (job == NULL) {
+        return RedisModule_ReplyWithError(ctx,"ERR warning: "
+            "deserialization error while reading job from AOF");
+    }
+
+    /* We'll enqueue the job if the state is queued, unless Disque was
+     * configured to never put jobs back on queue, for at-most-once jobs
+     * safety guarantees under weak AOF settings. */
+    int enqueue_job = 0;
+    if (job->state == JOB_STATE_QUEUED) {
+        if (ConfigLoadQueuedState) enqueue_job = 1;
+        job->state = JOB_STATE_ACTIVE;
+    }
+
+    /* Check if the job expired before registering it. */
+    if (job->etime <= time(NULL)) {
+        freeJob(job);
+        return RedisModule_ReplyWithSimpleString(ctx,"OK");
+    }
+
+    /* Register the job, and if needed enqueue it: we put jobs back into
+     * queues only if enqueue-jobs-at-next-restart option is set, that is,
+     * when a controlled restart happens. */
+    if (registerJob(job) == C_OK && enqueue_job)
+        enqueueJob(ctx,job,0);
+    return RedisModule_ReplyWithSimpleString(ctx,"OK");
+}
+
 #if 0
 
 /* ----------------------------------  AOF ---------------------------------- */
@@ -136,42 +185,6 @@ void AOFDelJob(job *job) {
 void AOFAckJob(job *job) {
     if (server.aof_state == AOF_OFF) return;
     AOFDelJob(job);
-}
-
-/* The LOADJOB command is emitted in the AOF to load serialized jobs at
- * restart, and is only processed while loading AOFs. Clients calling this
- * command get an error. */
-void loadjobCommand(client *c) {
-    if (!(c->flags & CLIENT_AOF_CLIENT)) {
-        addReplyError(c,"LOADJOB is a special command only processed from AOF");
-        return;
-    }
-    job *job = deserializeJob(ctx,c->argv[1]->ptr,sdslen(c->argv[1]->ptr),NULL,SER_STORAGE);
-
-    /* We expect to be able to read back what we serialized. */
-    if (job == NULL) {
-        RedisModule_Log(ctx,"warning",
-            "Unrecoverable error loading AOF: corrupted LOADJOB data.");
-        exit(1);
-    }
-
-    int enqueue_job = 0;
-    if (job->state == JOB_STATE_QUEUED) {
-        if (server.aof_enqueue_jobs_once) enqueue_job = 1;
-        job->state = JOB_STATE_ACTIVE;
-    }
-
-    /* Check if the job expired before registering it. */
-    if (job->etime <= time(NULL)) {
-        freeJob(job);
-        return;
-    }
-
-    /* Register the job, and if needed enqueue it: we put jobs back into
-     * queues only if enqueue-jobs-at-next-restart option is set, that is,
-     * when a controlled restart happens. */
-    if (registerJob(job) == C_OK && enqueue_job)
-        enqueueJob(job,0);
 }
 
 #endif

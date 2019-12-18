@@ -330,3 +330,5 @@ extern size_t (*RedisModule_MallocSize)(void* ptr);
 #define REDISMODULE_POSTPONED_ARRAY_LEN -1
 
 #define RedisModule_Assert(_e) ((_e)?(void)0 : (RedisModule__Assert(#_e,__FILE__,__LINE__),exit(1)))
+
+#define RedisModule_IsAOFClient(id) ((id) == UINT64_MAX)

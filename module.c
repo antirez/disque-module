@@ -194,6 +194,10 @@ int RedisModule_OnLoad(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) 
         disqueCommand,"",0,0,0) == REDISMODULE_ERR)
         return REDISMODULE_ERR;
 
+    if (RedisModule_CreateCommand(ctx,"LOADJOB",
+        loadjobCommand,"",0,0,0) == REDISMODULE_ERR)
+        return REDISMODULE_ERR;
+
     /* Disable Redis Cluster sharding and redirections: Not really needed
      * since Disque does not use the keyspace at all, but people may want to
      * use the Redis instances where Disque is running for caching or alike. */

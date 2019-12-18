@@ -1399,6 +1399,8 @@ void addReplyJobInfo(RedisModuleCtx *ctx, job *j) {
 
 /* SHOW <job-id> */
 int showCommand(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
+    if (argc != 2) return RedisModule_WrongArity(ctx);
+
     REDISMODULE_NOT_USED(argc);
     size_t idlen;
     const char *id = RedisModule_StringPtrLen(argv[1],&idlen);
@@ -1421,6 +1423,8 @@ int showCommand(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
  * The return value is the number of jobs evicted.
  */
 int deljobCommand(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
+    if (argc < 2) return RedisModule_WrongArity(ctx);
+
     int j, evicted = 0;
 
     if (validateJobIDs(ctx,argv+1,argc-1) == C_ERR) return REDISMODULE_OK;

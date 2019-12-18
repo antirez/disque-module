@@ -135,6 +135,7 @@ void PAUSEcallback(RedisModuleCtx *ctx, const char *sender_id, uint8_t msgtype, 
 void DELJOBcallback(RedisModuleCtx *ctx, const char *sender_id, uint8_t msgtype, const unsigned char *payload, uint32_t len);
 
 int disqueCommand(RedisModuleCtx *ctx, RedisModuleString **argv, int argc);
+int loadjobCommand(RedisModuleCtx *ctx, RedisModuleString **argv, int argc);
 
 #define UNIT_SECONDS 0
 #define UNIT_MILLISECONDS 1
