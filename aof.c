@@ -6,10 +6,23 @@
 
 /* AOF implementation is work in progress. */
 
-void AOFLoadJob(RedisModuleCtx *ctx, job *job) { UNUSED(job); UNUSED(ctx); }
-void AOFDelJob(RedisModuleCtx *ctx, job *job) { UNUSED(job); UNUSED(ctx); }
-void AOFAckJob(RedisModuleCtx *ctx, job *job) { UNUSED(job); UNUSED(ctx); }
-void AOFDequeueJob(RedisModuleCtx *ctx, job *job) { UNUSED(job); UNUSED(ctx); }
+void AOFLoadJob(RedisModuleCtx *ctx, job *job) {
+    sds serialized = serializeJob(sdsempty(),job,SER_STORAGE);
+    RedisModule_Replicate(ctx,"cb","LOADJOB",serialized,sdslen(serialized));
+    sdsfree(serialized);
+}
+
+void AOFDelJob(RedisModuleCtx *ctx, job *job) {
+    RedisModule_Replicate(ctx,"cb","DELJOB",job->id,JOB_ID_LEN);
+}
+
+void AOFAckJob(RedisModuleCtx *ctx, job *job) {
+    RedisModule_Replicate(ctx,"cb","ACKJOB",job->id,JOB_ID_LEN);
+}
+
+void AOFDequeueJob(RedisModuleCtx *ctx, job *job) {
+    RedisModule_Replicate(ctx,"cb","DEQUEUE",job->id,JOB_ID_LEN);
+}
 
 #define DISQUE_RDB_OPCODE_EOF 1
 #define DISQUE_RDB_OPCODE_MOREJOBS 2
@@ -138,53 +151,3 @@ int loadjobCommand(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
         enqueueJob(ctx,job,0);
     return RedisModule_ReplyWithSimpleString(ctx,"OK");
 }
-
-#if 0
-
-/* ----------------------------------  AOF ---------------------------------- */
-
-/* Emit a LOADJOB command into the AOF. which is used explicitly to load
- * serialized jobs form disk: LOADJOB <serialize-job-string>. */
-void AOFLoadJob(job *job) {
-    if (server.aof_state == AOF_OFF) return;
-
-    sds serialized = serializeJob(sdsempty(),job,SER_STORAGE);
-    RedisModuleString *seRedisModuleString = createObject(OBJ_STRING,serialized);
-    RedisModuleString *argv[2] = {shared.loadjob, seRedisModuleString};
-    feedAppendOnlyFile(argv,2);
-    decrRefCount(seRedisModuleString);
-}
-
-/* Emit a DELJOB command into the AOF. This function is called in the following
- * two cases:
- *
- * 1) As a side effect of the job being acknowledged, when AOFAckJob()
- *    is called.
- * 2) When the server evicts a job from memory, but only if the state is one
- *    of active or queued. Yet not replicated jobs are not written into the
- *    AOF so there is no need to send a DELJOB, while already acknowledged
- *    jobs are handled by point "1". */
-void AOFDelJob(job *job) {
-    if (server.aof_state == AOF_OFF) return;
-
-    RedisModuleString *jobid = createStringObject(job->id,JOB_ID_LEN);
-    RedisModuleString *argv[2] = {shared.deljob, jobid};
-    feedAppendOnlyFile(argv,2);
-    decrRefCount(jobid);
-}
-
-/* Emit a DELJOB command, since this is how we handle acknowledged jobs from
- * the point of view of AOF. We are not interested in loading back acknowledged
- * jobs, nor we include them on AOF rewrites, since ACKs garbage collection
- * works anyway if nodes forget about ACKs and dropping ACKs is not a safety
- * violation, it may just result into multiple deliveries of the same
- * message.
- *
- * However we keep the API separated, so it will be simple if we change our
- * mind or we want to have a feature to persist ACKs. */
-void AOFAckJob(job *job) {
-    if (server.aof_state == AOF_OFF) return;
-    AOFDelJob(job);
-}
-
-#endif
