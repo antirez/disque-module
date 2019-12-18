@@ -8,20 +8,20 @@
 
 void AOFLoadJob(RedisModuleCtx *ctx, job *job) {
     sds serialized = serializeJob(sdsempty(),job,SER_STORAGE);
-    RedisModule_Replicate(ctx,"cb","LOADJOB",serialized,sdslen(serialized));
+    RedisModule_Replicate(ctx,"LOADJOB","b",serialized,sdslen(serialized));
     sdsfree(serialized);
 }
 
 void AOFDelJob(RedisModuleCtx *ctx, job *job) {
-    RedisModule_Replicate(ctx,"cb","DELJOB",job->id,JOB_ID_LEN);
+    RedisModule_Replicate(ctx,"DELJOB","b",job->id,JOB_ID_LEN);
 }
 
 void AOFAckJob(RedisModuleCtx *ctx, job *job) {
-    RedisModule_Replicate(ctx,"cb","ACKJOB",job->id,JOB_ID_LEN);
+    RedisModule_Replicate(ctx,"ACKJOB","b",job->id,JOB_ID_LEN);
 }
 
 void AOFDequeueJob(RedisModuleCtx *ctx, job *job) {
-    RedisModule_Replicate(ctx,"cb","DEQUEUE",job->id,JOB_ID_LEN);
+    RedisModule_Replicate(ctx,"DEQUEUE","b",job->id,JOB_ID_LEN);
 }
 
 #define DISQUE_RDB_OPCODE_EOF 1
