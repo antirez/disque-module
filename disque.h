@@ -36,6 +36,12 @@ extern rax *ClusterLeavingNodes;
 extern unsigned char JobIDSeed[20];
 extern skiplist *AwakeList;
 
+#define DISQUE_PERSIST_DEQUEUED_NONE 0
+#define DISQUE_PERSIST_DEQUEUED_ATMOSTONCE 1
+#define DISQUE_PERSIST_DEQUEUED_ALL 2
+extern int ConfigPersistDequeued;
+extern int ConfigLoadQueuedState;
+
 #define UNUSED(V) ((void) V)
 
 #define C_ERR -1

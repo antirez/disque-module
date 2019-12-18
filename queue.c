@@ -194,14 +194,25 @@ job *queueFetchJob(RedisModuleCtx *ctx, queue *q, unsigned long *qlen) {
     q->atime = time(NULL);
     q->jobs_out++;
     if (qlen) *qlen = skiplistLength(q->sl);
+
     /* Jobs that have a retry set to 0 (at most once delivery semantics)
      * need to change state in the AOF as well: this way after a restart
      * we don't risk putting it into the queue again.
      *
      * Note that however when the AOF fsync policy is not strong enough,
      * after a crash the job may end in the queue again, so Disque offers
-     * an option to load jobs in "active" state instead of "queued" state. */
-    if (j->retry == 0) AOFDequeueJob(ctx,j);
+     * an option to load jobs in "active" state instead of "queued" state
+     * for additional safety.
+     *
+     * Disque can also be configured to log all the dequeue operations in
+     * order to provide a better crash-recovery experience (less duplicated
+     * jobs on restart). */
+    if ((ConfigPersistDequeued == DISQUE_PERSIST_DEQUEUED_ATMOSTONCE &&
+        j->retry == 0) ||
+        ConfigPersistDequeued == DISQUE_PERSIST_DEQUEUED_ALL)
+    {
+        AOFDequeueJob(ctx,j);
+    }
     return j;
 }
 

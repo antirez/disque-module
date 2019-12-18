@@ -66,12 +66,12 @@ int DisqueRDBAuxLoad(RedisModuleIO *rdb, int encver, int when) {
         }
         RedisModule_FreeString(ctx,serialized);
 
-        /* We'll enqueue the job only if Disque was restarted with the
-         * controlled restart option. */
+        /* We'll enqueue the job if the state is queued, unless Disque was
+         * configured to never put jobs back on queue, for at-most-once jobs
+         * safety guarantees under weak AOF settings. */
         int enqueue_job = 0;
         if (job->state == JOB_STATE_QUEUED) {
-            if (0 /* XXX: FIXME: server.aof_enqueue_jobs_once */)
-                enqueue_job = 1;
+            if (ConfigLoadQueuedState) enqueue_job = 1;
             job->state = JOB_STATE_ACTIVE;
         }
 

@@ -31,6 +31,11 @@ int RedisConfigIsValid;             /* True if in the last check the Redis
                                        valid: AOF is on, RDB preamble for AOF
                                        is active. */
 
+/* Options that you can configure when loading the module. */
+int ConfigPersistDequeued = DISQUE_PERSIST_DEQUEUED_ALL;
+int ConfigLoadQueuedState = 1; /* By default put jobs back in queue on
+                                  restart. */
+
 void initDisque(void) {
     Jobs = raxNew();
     Queues = raxNew();

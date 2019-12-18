@@ -19,6 +19,10 @@ Technical debts in Disque as a module
   Now we generate DEQUEUE commands in the AOF for at-most-once jobs that
   are removed from the queue.
 
+* Have an option to generate DEQUEUE in the AOF for every job, not just
+  jobs with retry set to 0. More AOF traffic but less chances of re-delivery
+  on restarts.
+
 * Fix blocking in same queue mulitple times. Grep for blockForJobs().
 
 * Implement AOF and AOF rewriting, or an alternative file-based and threaded
