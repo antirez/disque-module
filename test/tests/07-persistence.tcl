@@ -1,18 +1,6 @@
 source "../tests/includes/init-tests.tcl"
 source "../tests/includes/job-utils.tcl"
 
-test "Enable AOF" {
-    foreach_redis_id j {
-        R $j CONFIG SET appendonly yes
-        R $j CONFIG REWRITE
-        wait_for_condition 1000 50 {
-            [DI $j aof_state] eq {on}
-        } else {
-            fail "Can't enable AOF for instance #$j"
-        }
-    }
-}
-
 for {set i 0} {$i < 5} {incr i} {
     set qname [randomQueue]
     set repl_level 3
@@ -49,11 +37,3 @@ for {set i 0} {$i < 5} {incr i} {
         assert {[lindex $myjob 2] eq $body}
     }
 }
-
-test "Disable AOF" {
-    foreach_redis_id j {
-        R $j CONFIG SET appendonly no
-        R $j CONFIG REWRITE
-    }
-}
-

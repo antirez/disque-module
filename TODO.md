@@ -4,6 +4,13 @@ Technical debts in Disque as a module
 (this list is in no way complete, because this version of Disque as a
  module is an alpha at best)
 
+* When deserializing jobs, is it correct even in the new module
+  setup that we want to remove the node from the list of nodes that
+  may have a copy? In the original Disque this was mandatory because we
+  referenced the node object itself, but now we just have the ID, so it
+  may make more sense to remember the ID. But then during garbage
+  collection, remove the nodes that we don't know anything about.
+
 * Implement "leaving":
     - Set the "leaving" flag if the global vars leaving is true.
     - Process the leaving flag when a message is received: if set make sure to
