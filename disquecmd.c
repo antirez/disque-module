@@ -49,8 +49,7 @@ struct disqueInfoProperty {
 /* DISQUE INFO [option name] */
 int disqueInfo(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
     if (argc != 2 & argc != 3) return RedisModule_WrongArity(ctx);
-    int stringout = 0;
-    sds output = NULL;
+    int allfields = 0, numfields = 0;
     const char *wanted = NULL;
 
     /* If no info property name is given, reply with a human readable string.
@@ -59,8 +58,8 @@ int disqueInfo(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
     if (argc == 3) {
         wanted = RedisModule_StringPtrLen(argv[2],NULL);
     } else {
-        stringout = 1;
-        output = sdsempty();
+        allfields = 1;
+        RedisModule_ReplyWithArray(ctx,REDISMODULE_POSTPONED_ARRAY_LEN);
     }
 
     /* Scan all the options: either search a match in case of single option
@@ -86,13 +85,17 @@ int disqueInfo(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
         }
 
 
-        /* Either accumulate it as a string or emit it if there is
-         * a match. */
-        if (stringout) {
+        /* Either emit every entry as an array of strings or, in case the
+         * user specified a single property, emit it if there is a match. */
+        if (allfields) {
+            sds output = sdsempty();
             if (dp->type == DISQUE_INFO_TYPE_INT)
-                output = sdscatprintf(output,"%s:%d\n",dp->name,intval);
+                output = sdscatprintf(output,"%s:%d",dp->name,intval);
             else if (dp->type == DISQUE_INFO_TYPE_ULONGLONG)
-                output = sdscatprintf(output,"%s:%llu\n",dp->name,ulonglongval);
+                output = sdscatprintf(output,"%s:%llu",dp->name,ulonglongval);
+            RedisModule_ReplyWithStringBuffer(ctx,output,sdslen(output));
+            sdsfree(output);
+            numfields++;
         } else if (!strcasecmp(wanted,dp->name)) {
             if (dp->type == DISQUE_INFO_TYPE_INT)
                 return RedisModule_ReplyWithLongLong(ctx,intval);
@@ -101,11 +104,10 @@ int disqueInfo(RedisModuleCtx *ctx, RedisModuleString **argv, int argc) {
         }
     }
 
-    /* Emit the string or return NULL if we got no match in case the
+    /* Emit the arrays of strings or return NULL if we got no match in case the
      * caller was looking for a specific property value. */
-    if (stringout) {
-        RedisModule_ReplyWithVerbatimString(ctx,output,sdslen(output));
-        sdsfree(output);
+    if (allfields) {
+        RedisModule_ReplySetArrayLength(ctx,numfields);
     } else {
         RedisModule_ReplyWithNull(ctx);
     }
